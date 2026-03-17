@@ -80,8 +80,13 @@ module gemm_pe (
     ///////////////////////////////////////////////////////////////////////////
     logic [ACC_WIDTH-1:0] acc_q;
     logic [ACC_WIDTH-1:0] mac_result;
+    logic [15:0] mult_out;
 
-    assign mac_result = acc_q + (ACC_WIDTH'(a_gated) * ACC_WIDTH'(w_gated));
+    FloatP4x16 fp4_mul (.A(a_gated), .B(w_gated), .Out(mult_out));
+
+    fp16_adder adder (.op_a(acc_q), .op_b(mult_out), .result(mac_result));
+
+    // assign mac_result = acc_q + (ACC_WIDTH'(a_gated) * ACC_WIDTH'(w_gated));
 
     ///////////////////////////////////////////////////////////////////////////
     // Accumulator register

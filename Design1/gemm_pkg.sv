@@ -11,8 +11,8 @@ package gemm_pkg;
     localparam int ARRAY_SIZE       = 8;    // 8x8 systolic array
 
     // ── Data Bitwidths ────────────────────────────────────────────────────
-    localparam int ACT_WIDTH        = 8;    // activation input bitwidth
-    localparam int WGT_WIDTH        = 8;    // weight input bitwidth
+    localparam int ACT_WIDTH        = 4;    // activation input bitwidth
+    localparam int WGT_WIDTH        = 4;    // weight input bitwidth
     localparam int ACC_WIDTH        = 16;   // accumulator / MAC output bitwidth
     localparam int OUT_WIDTH        = 4;    // quantized output bitwidth
 
