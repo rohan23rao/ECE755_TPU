@@ -34,7 +34,7 @@ module tb_gemm_control_unit;
     logic                           TILE_START, METADATA_VLD;
     logic [DIM_WIDTH-1:0]           A_LEN, W_LEN, K_LEN;
     logic                           BIAS_NEW, TILE_LAST, RELU_EN;
-    logic                           DATA_VLD, BIAS_VLD, Y_RDY;
+    logic                           DATA_VLD, BIAS_VLD, Y_RDY, SCALE_VLD;
 
     logic                           METADATA_RDY, DATA_RDY, BIAS_RDY;
     logic                           SCALE_RDY, Y_VLD, TILE_DONE;
@@ -57,7 +57,8 @@ module tb_gemm_control_unit;
         .K_LEN       (K_LEN),       .BIAS_NEW    (BIAS_NEW),
         .TILE_LAST   (TILE_LAST),   .RELU_EN     (RELU_EN),
         .DATA_VLD    (DATA_VLD),    .BIAS_VLD    (BIAS_VLD),
-        .Y_RDY       (Y_RDY),       .METADATA_RDY(METADATA_RDY),
+        .Y_RDY       (Y_RDY),       .SCALE_VLD   (SCALE_VLD),
+        .METADATA_RDY(METADATA_RDY),
         .DATA_RDY    (DATA_RDY),    .BIAS_RDY    (BIAS_RDY),
         .SCALE_RDY   (SCALE_RDY),  .Y_VLD       (Y_VLD),
         .TILE_DONE   (TILE_DONE),   .A_IN_EN     (A_IN_EN),
@@ -124,7 +125,7 @@ module tb_gemm_control_unit;
         TILE_START = 0; METADATA_VLD = 0;
         A_LEN = 0; W_LEN = 0; K_LEN = 0;
         BIAS_NEW = 0; TILE_LAST = 0; RELU_EN = 0;
-        DATA_VLD = 0; BIAS_VLD = 0; Y_RDY = 0;
+        DATA_VLD = 0; BIAS_VLD = 0; Y_RDY = 0; SCALE_VLD = 0;
     endtask
 
     ///////////////////////////////////////////////////////////////////////////
@@ -241,8 +242,10 @@ module tb_gemm_control_unit;
             if (cyc == total-1) begin
                 if (check_tile_done)
                     check(TILE_DONE, 1'b1, "TILE_DONE=1 on compute_done cycle");
-                if (pre_flush)
-                    Y_RDY = 1;  // pre-assert before transition clock
+                if (pre_flush) begin
+                    Y_RDY     = 1;  // pre-assert both before transition clock
+                    SCALE_VLD = 1;
+                end
             end
 
             @(posedge clk); #1;
@@ -261,28 +264,34 @@ module tb_gemm_control_unit;
     //
     // Sample each column BEFORE the clock that increments main_cnt.
     ///////////////////////////////////////////////////////////////////////////
+    ///////////////////////////////////////////////////////////////////////////
+    // Task: GEMM_FLUSH
+    // Y_RDY and SCALE_VLD pre-asserted by do_gemm_compute(pre_flush=1).
+    // RTL advances only on Y_RDY && SCALE_VLD. SCALE_RDY = Y_RDY in flush.
+    ///////////////////////////////////////////////////////////////////////////
     task do_gemm_flush(
         input int                    w_dim,
         input logic [ARRAY_SIZE-1:0] a_mask,
         input logic                  relu_en_exp
     );
-        // Y_RDY pre-asserted by do_gemm_compute(pre_flush=1) before
-        // transition clock. NO entry clock — COL_ADDR=0 valid on entry.
+        // Y_RDY and SCALE_VLD both pre-asserted. NO entry clock.
         for (int w = 0; w < w_dim; w++) begin
-            // sample before clock — COL_ADDR = w at this point
+            check(SCALE_RDY,   1'b1,
+                $sformatf("SCALE_RDY=1 at flush w=%0d", w));
             check_addr(COL_ADDR,   FIFO_ADDR_WIDTH'(w),
                 $sformatf("COL_ADDR=%0d at flush w=%0d", w, w));
             check_vec(QUANT_EN,    a_mask,
                 $sformatf("QUANT_EN=A_MASK at flush w=%0d", w));
             check(RELU_EN_out,     relu_en_exp,
                 $sformatf("RELU_EN_out=%0b at flush w=%0d", relu_en_exp, w));
-            @(posedge clk); #1;  // COL_ADDR increments here
+            @(posedge clk); #1;
         end
-        Y_RDY = 0;
+        Y_RDY = 0; SCALE_VLD = 0;
 
-        // Y_VLD is flopped — high 1 cycle after last flush handshake
+        // Y_VLD flopped — high 1 cycle after last flush handshake
         check(Y_VLD,     1'b1, "Y_VLD=1 after last flush");
         check(TILE_DONE, 1'b0, "TILE_DONE deasserted after flush done");
+        check(SCALE_RDY, 1'b0, "SCALE_RDY=0 back in IDLE");
     endtask
 
     ///////////////////////////////////////////////////////////////////////////
@@ -445,21 +454,26 @@ module tb_gemm_control_unit;
 
             $display("    --- GEMM_FLUSH with stall on col 1 ---");
 
-            // Col 0 — sample then clock
+            // Col 0 — Y_RDY=1 and SCALE_VLD=1 from pre_flush
+            SCALE_VLD = 1;
+            check(SCALE_RDY, 1'b1, "SCALE_RDY=1 col 0");
             check_addr(COL_ADDR, 3'd0, "COL_ADDR=0 flush col 0");
             check_vec(QUANT_EN, a_mask, "QUANT_EN=A_MASK col 0");
             @(posedge clk); #1;
 
-            // Stall on col 1
-            Y_RDY = 0;
+            // Stall on col 1 — deassert Y_RDY and SCALE_VLD
+            Y_RDY = 0; SCALE_VLD = 0; #1;
             repeat(3) begin
+                check(SCALE_RDY,  1'b0, "SCALE_RDY=0 during stall");
                 check_addr(COL_ADDR, 3'd1, "COL_ADDR=1 held during stall");
                 check(Y_VLD,         1'b1, "Y_VLD=1 held during stall");
+                check_vec(QUANT_EN,  '0,   "QUANT_EN=0 during stall");
                 @(posedge clk); #1;
             end
 
-            // Resume col 1 — sample then clock
-            Y_RDY = 1;
+            // Resume col 1 — reassert Y_RDY and SCALE_VLD
+            Y_RDY = 1; SCALE_VLD = 1; #1;
+            check(SCALE_RDY, 1'b1, "SCALE_RDY=1 on resume");
             check_addr(COL_ADDR, 3'd1, "COL_ADDR=1 resumes after stall");
             @(posedge clk); #1;
 
@@ -470,7 +484,7 @@ module tb_gemm_control_unit;
             // Col 3
             check_addr(COL_ADDR, 3'd3, "COL_ADDR=3 flush col 3");
             @(posedge clk); #1;
-            Y_RDY = 0;
+            Y_RDY = 0; SCALE_VLD = 0;
 
             @(posedge clk); #1;
             check(METADATA_RDY, 1'b1, "METADATA_RDY=1 back in IDLE after flush");
@@ -516,14 +530,16 @@ module tb_gemm_control_unit;
             do_gemm_compute(8, 8, 8, 8'hFF, 8'hFF, .pre_flush(1'b1));
 
             $display("    Tile 2 flush: W=8 columns");
+            SCALE_VLD = 1; // already set by pre_flush, explicit for clarity
             for (int w = 0; w < 8; w++) begin
+                check(SCALE_RDY, 1'b1, $sformatf("Tile2: SCALE_RDY=1 col %0d", w));
                 check_addr(COL_ADDR, FIFO_ADDR_WIDTH'(w),
                     $sformatf("Tile2: COL_ADDR=%0d", w));
                 check_vec(QUANT_EN, 8'hFF,
                     $sformatf("Tile2: QUANT_EN=FF col %0d", w));
                 @(posedge clk); #1;
             end
-            Y_RDY = 0;
+            Y_RDY = 0; SCALE_VLD = 0;
 
             @(posedge clk); #1;
             check(METADATA_RDY, 1'b1, "Tile2: METADATA_RDY=1 back in IDLE");

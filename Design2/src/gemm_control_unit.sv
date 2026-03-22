@@ -39,12 +39,13 @@ module gemm_control_unit (
     input  logic                    DATA_VLD,
     input  logic                    BIAS_VLD,
     input  logic                    Y_RDY,
+    input  logic                    SCALE_VLD,      // scale valid from vector unit
 
     // External Outputs
     output logic                    METADATA_RDY,
     output logic                    DATA_RDY,
     output logic                    BIAS_RDY,
-    output logic                    SCALE_RDY,      // = Y_RDY pass-through
+    output logic                    SCALE_RDY,      // from FSM — asserted in GEMM_FLUSH
     output logic                    Y_VLD,
     output logic                    TILE_DONE,
 
@@ -103,6 +104,7 @@ module gemm_control_unit (
         .DATA_VLD         (DATA_VLD),
         .BIAS_VLD         (BIAS_VLD),
         .Y_RDY            (Y_RDY),
+        .SCALE_VLD        (SCALE_VLD),
 
         // Done signals from CU datapath → FSM
         .data_load_done   (data_load_done),
@@ -130,6 +132,7 @@ module gemm_control_unit (
         // External outputs — direct from FSM
         .DATA_RDY         (DATA_RDY),
         .BIAS_RDY         (BIAS_RDY),
+        .SCALE_RDY        (SCALE_RDY),
         .Y_VLD            (Y_VLD),
         .TILE_DONE        (TILE_DONE),
         .METADATA_RDY     (METADATA_RDY)
@@ -292,13 +295,6 @@ module gemm_control_unit (
                      ({{(ARRAY_SIZE-1){1'b0}}, 1'b1} << bias_cnt[FIFO_ADDR_WIDTH-1:0]);
 
 
-
-	///////////////////////////////////////////////////////////////////////////
-    // SCALE_RDY — direct pass-through
-    ///////////////////////////////////////////////////////////////////////////
-    assign SCALE_RDY = Y_RDY;
-	
-	
 	
 	///////////////////////////////////////////////////////////////////////////
     // Address Generation

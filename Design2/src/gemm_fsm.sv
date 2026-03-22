@@ -20,6 +20,7 @@ module gemm_fsm (
 	input logic DATA_VLD,
 	input logic BIAS_VLD,
 	input logic Y_RDY,
+	input logic SCALE_VLD,        // scale value valid from vector unit
 	
 	// Control Unit Datapath Inputs
 	input logic data_load_done,
@@ -47,11 +48,11 @@ module gemm_fsm (
 	// External Outputs
 	output logic DATA_RDY,
     output logic BIAS_RDY,
+	output logic SCALE_RDY,       // asserted in GEMM_FLUSH — ready to accept scale
 	output logic Y_VLD,         // flopped 1 cycle
 	output logic TILE_DONE,
     output logic METADATA_RDY
 );
-
 
 	////////////////////////////////////////////////////////////////
 	// FSM Internal Signals
@@ -121,6 +122,7 @@ module gemm_fsm (
         shift_pe_wave    = '0;
         DATA_RDY         = '0;
         BIAS_RDY         = '0;
+		SCALE_RDY        = '0;
         FIFO_IN_EN       = '0;
         LD_BIAS_en       = '0;
         PE_EN            = '0;
@@ -192,13 +194,15 @@ module gemm_fsm (
 			
 			
 			GEMM_FLUSH: begin
-				// Only if reader is ready, we perform QUANT en
-				if (Y_RDY) begin
+				SCALE_RDY = Y_RDY; // Enable Upstream only when downstream is ready
+			
+				// Only advance when both output consumer (Y_RDY) and scale (SCALE_VLD) ready
+				if (Y_RDY && SCALE_VLD) begin
 					QUANT_EN    = 1;
 					RELU_EN_out = RELU_EN_r;
                     inc_main_cnt = 1;
                     y_vld_next   = 1;
-					
+
 					// If on final cycle, transition out
 					if (flush_done) begin
 						next_state = IDLE;
