@@ -5,11 +5,7 @@ module FloatP4x16 #(
 )(
     input wire [INPUT_WIDTH-1:0]    A,
     input wire [INPUT_WIDTH-1:0]    B,
-
-    output wire                     raw_product_sign,
-    output wire [4:0]               raw_product_exp,
-    output wire [3:0]               raw_product_sig,
-    output wire                     raw_product_is_zero
+    output wire [OUTPUT_WIDTH-1:0]  Out
 );
 
 //FP4
@@ -74,11 +70,30 @@ assign effective_exp_out = {3'b000, effective_exp_a} + {3'b000, effective_exp_b}
 //Update the run_main.sh script with the right module if youre using verilator
 //FixedP2x4 iFiMult(.A(effective_mantissa_a), .B(effective_mantissa_b), .Out(effective_mantissa_out));
 FixedP2x4_opt iFiMult(.A(effective_mantissa_a), .B(effective_mantissa_b), .Out(effective_mantissa_out));
-  
-// Added raw multiplier outputs
-assign raw_product_sign    = stored_sign_a ^ stored_sign_b;
-assign raw_product_exp     = effective_exp_out;
-assign raw_product_sig     = effective_mantissa_out;
-assign raw_product_is_zero = is_zero;
+
+//Stage 4 - Comput Output stored
+assign stored_sign_out = stored_sign_a ^ stored_sign_b;
+
+    //Normalization
+    //  shift factor is added to exponent
+    //      +1 -    means that mantissa multiply resulted in 2.25 thus we right shift
+    //      0 -     mantissa multiply in normal range
+    //      -1/2 -  mantissa multiply less than 1, need to left shift (subtract from exp)
+
+assign shift_factor =   (effective_mantissa_out[3]) ? 5'b00001 : 
+                        ((~effective_mantissa_out[3] & ~effective_mantissa_out[2] & effective_mantissa_out[1]) ? 5'b11111 :
+                        (~effective_mantissa_out[3] & ~effective_mantissa_out[2] & ~effective_mantissa_out[1]) ? 5'b11110 :
+                        5'b00000);
+
+assign stored_mantissa_out = (shift_factor == 5'b00001) ? {effective_mantissa_out[2:0], 7'b0} :
+                             ((shift_factor == 5'b11111) ? {effective_mantissa_out[0], 9'b0} :
+                             ((shift_factor == 5'b11110) ? {10'b0} : 
+                             {effective_mantissa_out[1:0],8'b0})); //default cause (shift factor is 0)
+
+
+assign stored_exponent_out = (effective_exp_out + shift_factor);
+
+//Assign Output
+assign Out = (is_zero) ? 0 : {stored_sign_out, stored_exponent_out, stored_mantissa_out};
 
 endmodule

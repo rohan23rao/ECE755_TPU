@@ -1,70 +1,35 @@
 `timescale 1ns / 1ps
 
 module fp16_adder (
-    input  logic [15:0] op_b,
-
-    input  logic        raw_sign,
-    input  logic [4:0]  raw_exp,
-    input  logic [3:0]  raw_sig,
-    input  logic        raw_is_zero,
-
-    output logic [15:0] result
+    input  wire [15:0] op_a,
+    input  wire [15:0] op_b,
+    output reg  [15:0] result
 );
 
+    // Unpack op_a
+    wire sa = op_a[15];
+    wire [4:0]  ea = op_a[14:10];
+    wire [9:0]  ma = op_a[9:0];
+
     // Unpack op_b
-    logic        sb;
-    logic [4:0]  eb;
-    logic [9:0]  mb;
+    wire sb = op_b[15];
+    wire [4:0]  eb = op_b[14:10];
+    wire [9:0]  mb = op_b[9:0];
 
-    assign sb = op_b[15];
-    assign eb = op_b[14:10];
-    assign mb = op_b[9:0];
+    // Zero, Inf, and Nan checks
+    wire a_is_zero = (ea == 5'd0)  && (ma == 10'd0);
+    wire b_is_zero = (eb == 5'd0)  && (mb == 10'd0);
+    wire a_is_inf  = (ea == 5'd31) && (ma == 10'd0);
+    wire b_is_inf  = (eb == 5'd31) && (mb == 10'd0);
+    wire a_is_nan  = (ea == 5'd31) && (ma != 10'd0);
+    wire b_is_nan  = (eb == 5'd31) && (mb != 10'd0);
 
-    // Zero, Inf, and Nan checks for op_b
-    logic b_is_zero, b_is_inf, b_is_nan;
+    // Reconstruct full significands with leading bit
+    wire [10:0] sig_a = (ea == 5'd0) ? {1'b0, ma} : {1'b1, ma};
+    wire [10:0] sig_b = (eb == 5'd0) ? {1'b0, mb} : {1'b1, mb};
 
-    assign b_is_zero = (eb == 5'd0)  && (mb == 10'd0);
-    assign b_is_inf  = (eb == 5'd31) && (mb == 10'd0);
-    assign b_is_nan  = (eb == 5'd31) && (mb != 10'd0);
-
-    // Reconstruct full significand of op_b with leading bit
-    logic [10:0] sig_b;
-    logic [5:0]  eff_eb;
-
-    assign sig_b  = (eb == 5'd0) ? {1'b0, mb} : {1'b1, mb};
-    assign eff_eb = (eb == 5'd0) ? 6'd1 : {1'b0, eb};
-
-    // Normalize raw product directly into FP16 to simply additional logic
-    logic [10:0] sig_a;
-    logic [5:0]  eff_ea;
-
-    always_comb begin
-        casez (raw_sig)
-            4'b1???: begin
-                sig_a  = {1'b1, raw_sig[2:0], 7'b0};
-                eff_ea = {1'b0, raw_exp} + 6'd1;
-            end
-            4'b01??: begin
-                sig_a  = {1'b1, raw_sig[1:0], 8'b0};
-                eff_ea = {1'b0, raw_exp};
-            end
-            4'b001?: begin
-                sig_a  = {1'b1, raw_sig[0], 9'b0};
-                eff_ea = {1'b0, raw_exp} - 6'd1;
-            end
-            4'b0001: begin
-                sig_a  = {1'b1, 10'b0};
-                eff_ea = {1'b0, raw_exp} - 6'd2;
-            end
-            default: begin
-                sig_a  = 11'b0;
-                eff_ea = 6'd0;
-            end
-        endcase
-    end
-
-    logic sa;
-    assign sa = raw_is_zero ? 1'b0 : raw_sign;
+    wire [5:0] eff_ea = (ea == 5'd0) ? 6'd1 : {1'b0, ea};
+    wire [5:0] eff_eb = (eb == 5'd0) ? 6'd1 : {1'b0, eb};
 
     // Compare effective exponents with leading 0/1 and then determine larger/smaller one to swap
     logic        swap;
@@ -95,34 +60,28 @@ module fp16_adder (
     // Near Path
 
     // Alignment
-    logic [13:0] near_lg_ext, near_sm_ext, near_diff;
+    logic [13:0] near_lg_ext, near_sm_ext;
 
     assign near_lg_ext = {sig_lg, 3'b000};
     assign near_sm_ext = (exp_diff == 6'd1) ? {1'b0, sig_sm, 2'b00} : {sig_sm, 3'b000};
-    assign near_diff   = near_lg_ext - near_sm_ext;
+
+    logic [13:0] near_diff;
+
+    ks_sub14 u_near_sub (
+        .a    (near_lg_ext),
+        .b    (near_sm_ext),
+        .diff (near_diff)
+    );
 
     // Count leading zeros in the near difference to determine normalization shift
     logic [3:0] near_lzc;
+    logic       near_all_zero;
 
-    always_comb begin
-        casez (near_diff)
-            14'b1?????????????: near_lzc = 4'd0;
-            14'b01????????????: near_lzc = 4'd1;
-            14'b001???????????: near_lzc = 4'd2;
-            14'b0001??????????: near_lzc = 4'd3;
-            14'b00001?????????: near_lzc = 4'd4;
-            14'b000001????????: near_lzc = 4'd5;
-            14'b0000001???????: near_lzc = 4'd6;
-            14'b00000001??????: near_lzc = 4'd7;
-            14'b000000001?????: near_lzc = 4'd8;
-            14'b0000000001????: near_lzc = 4'd9;
-            14'b00000000001???: near_lzc = 4'd10;
-            14'b000000000001??: near_lzc = 4'd11;
-            14'b0000000000001?: near_lzc = 4'd12;
-            14'b00000000000001: near_lzc = 4'd13;
-            default:            near_lzc = 4'd14;
-        endcase
-    end
+    lod_tree_14 u_near_lzc (
+        .din      (near_diff),
+        .lzc      (near_lzc),
+        .all_zero (near_all_zero)
+    );
 
     // Normalize near result
     logic [5:0]  near_exp;
@@ -134,7 +93,7 @@ module fp16_adder (
         near_exp     = 6'd0;
         near_sig     = 11'd0;
 
-        if (near_diff != 14'd0) begin
+        if (!near_all_zero) begin
             if ({2'b0, near_lzc} >= e_lg && e_lg > 6'd0) begin
                 near_shifted = near_diff << (e_lg - 6'd1);
                 near_exp     = 6'd1;
@@ -156,7 +115,12 @@ module fp16_adder (
     assign near_round_bit = near_shifted[1];
     assign near_sticky    = near_shifted[0];
     assign near_do_round  = near_guard & (near_round_bit | near_sticky | near_pre_round[0]);
-    assign near_rounded   = {1'b0, near_pre_round} + {11'd0, near_do_round};
+
+    dual_round_11 u_near_round (
+        .sig      (near_pre_round),
+        .do_round (near_do_round),
+        .rounded  (near_rounded)
+    );
 
     // Normalize again if rounding caused overflow
     logic [5:0] near_post_exp;
@@ -187,9 +151,13 @@ module fp16_adder (
     logic [14:0] far_sum;
     logic        far_sticky_raw;
 
-    assign far_sum = eff_sub
-        ? ({1'b0, far_lg_ext} - {1'b0, far_sm_aligned} - {14'd0, far_sticky_shift})
-        : ({1'b0, far_lg_ext} + {1'b0, far_sm_aligned});
+    ks_addsub15 u_far_addsub (
+        .a         ({1'b0, far_lg_ext}),
+        .b         ({1'b0, far_sm_aligned}),
+        .mode_sub  (eff_sub),
+        .borrow_in (far_sticky_shift),
+        .result    (far_sum)
+    );
 
     assign far_sticky_raw = far_sum[0] | far_sticky_shift;
 
@@ -231,7 +199,12 @@ module fp16_adder (
                             | (far_sum[14] ? (|far_norm_sum[1:0]) : far_norm_sum[0]);
 
     assign far_do_round = far_guard & (far_round_bit | far_final_sticky | far_pre_round[0]);
-    assign far_rounded  = {1'b0, far_pre_round} + {11'd0, far_do_round};
+
+    dual_round_11 u_far_round (
+        .sig      (far_pre_round),
+        .do_round (far_do_round),
+        .rounded  (far_rounded)
+    );
 
     // Normalize again if rounding caused overflow
     logic [5:0] far_post_exp;
@@ -250,25 +223,29 @@ module fp16_adder (
     assign post_exp  = use_near ? near_post_exp  : far_post_exp;
     assign post_mant = use_near ? near_post_mant : far_post_mant;
 
+    wire [11:0] rounded_sig = use_near ? near_rounded : far_rounded;
+
     // Determine special cases and pack final result
     always_comb begin
-        if (b_is_nan)
+        if (a_is_nan || b_is_nan)
             result = 16'h7FFF;
+        else if (a_is_inf && b_is_inf && eff_sub)
+            result = 16'h7FFF;
+        else if (a_is_inf && b_is_inf)
+            result = {sa, 5'b11111, 10'd0};
+        else if (a_is_inf)
+            result = op_a;
         else if (b_is_inf)
             result = op_b;
-        else if (raw_is_zero && b_is_zero)
+        else if (a_is_zero && b_is_zero)
             result = {sa & sb, 15'd0};
-        else if (raw_is_zero)
+        else if (a_is_zero)
             result = op_b;
-        else if (b_is_zero) begin
-            if (eff_ea >= 6'd31)
-                result = {raw_sign, 5'b11111, 10'd0};
-            else
-                result = {raw_sign, eff_ea[4:0], sig_a[9:0]};
-        end
+        else if (b_is_zero)
+            result = op_a;
         else if (post_exp >= 6'd31)
             result = {s_lg, 5'b11111, 10'd0};
-        else if ((post_exp == 6'd0) && (post_mant == 10'd0))
+        else if ((post_exp == 6'd0) && (post_mant == 10'd0) && !rounded_sig[10])
             result = 16'h0000;
         else
             result = {s_lg, post_exp[4:0], post_mant};

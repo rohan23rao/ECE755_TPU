@@ -86,21 +86,12 @@ module gemm_pe (
     // TODO: replace with instantiated FP4 multiplier
     //   mul_comb = fp4_mul(a_gated, w_gated)
     ///////////////////////////////////////////////////////////////////////////
-    logic [ACC_WIDTH-1:0] mul_comb;
-    // assign mul_comb = ACC_WIDTH'(a_gated) * ACC_WIDTH'(w_gated);
+    logic [15:0] mult_out;
 
-    logic        mul_sign;
-    logic [4:0]  mul_exp;
-    logic [3:0]  mul_sig;
-    logic        mul_is_zero;
- 
     FloatP4x16 u_fp4_mul (
-        .A                   (a_gated),
-        .B                   (w_gated),
-        .raw_product_sign    (mul_sign),
-        .raw_product_exp     (mul_exp),
-        .raw_product_sig     (mul_sig),
-        .raw_product_is_zero (mul_is_zero)
+        .A   (a_gated),
+        .B   (w_gated),
+        .Out (mult_out)
     );
 
     ///////////////////////////////////////////////////////////////////////////
@@ -113,26 +104,12 @@ module gemm_pe (
     // pe_en_q   no reset — pipeline flushes naturally, FSM ensures no spurious
     //           accumulation before first ld_bias initializes the accumulator
     ///////////////////////////////////////////////////////////////////////////
-    // logic [ACC_WIDTH-1:0] mul_out_q;
-    // logic                 pe_en_q;
+    logic [ACC_WIDTH-1:0] mul_out_q;
+    logic                 pe_en_q;
 
-    // always_ff @(posedge clk) begin
-    //     mul_out_q <= mul_comb;
-    //     pe_en_q   <= pe_en;
-    // end
-
-    logic        mul_sign_q;
-    logic [4:0]  mul_exp_q;
-    logic [3:0]  mul_sig_q;
-    logic        mul_is_zero_q;
-    logic        pe_en_q;
- 
     always_ff @(posedge clk) begin
-        mul_sign_q    <= mul_sign;
-        mul_exp_q     <= mul_exp;
-        mul_sig_q     <= mul_sig;
-        mul_is_zero_q <= mul_is_zero;
-        pe_en_q           <= pe_en;
+        mul_out_q <= mult_out;
+        pe_en_q   <= pe_en;
     end
 
     ///////////////////////////////////////////////////////////////////////////
@@ -144,12 +121,9 @@ module gemm_pe (
     logic [ACC_WIDTH-1:0] add_result;
 
     fp16_adder u_fp16_add (
-        .op_b        (acc_q),
-        .raw_sign    (mul_sign_q),
-        .raw_exp     (mul_exp_q),
-        .raw_sig     (mul_sig_q),
-        .raw_is_zero (mul_is_zero_q),
-        .result      (add_result)
+        .op_a   (mul_out_q),
+        .op_b   (acc_q),
+        .result (add_result)
     );
 
     ///////////////////////////////////////////////////////////////////////////
