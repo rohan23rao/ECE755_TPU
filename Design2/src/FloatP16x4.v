@@ -39,7 +39,7 @@ wire signed [INPUT_EXPONENT_BITS+1:0] effective_exp_a, effective_exp_b; // 7-bit
 wire [INPUT_MANTISSA_BITS:0] effective_mantissa_a, effective_mantissa_b; //MSB is norm LSB is mantissa
 //Effective Output Values
 wire signed [INPUT_EXPONENT_BITS+1:0] effective_exp_out;  // 7-bit signed
-wire [FP16_EFFECTIVE_MANTISSA_MSB:0] effective_mantissa_out_p1, effective_mantissa_out_p2, effective_mantissa_out; // 22-bit result
+wire [7:0] effective_mantissa_out; // 22-bit result
 //Stored Output Values
 wire stored_sign_out;
 wire signed [INPUT_EXPONENT_BITS+1:0] stored_exponent_out; // 7-bit signed
@@ -72,16 +72,14 @@ assign effective_mantissa_b = {is_norm_b, stored_mantissa_b};
 //Stage 3 - Compute Output effectives
 assign effective_exp_out = effective_exp_a + effective_exp_b + FP4_BIAS; //FP4 Bias
 
-dadda iFiMult(.x(effective_mantissa_a), .y(effective_mantissa_b), .z0(effective_mantissa_out_p1), .z1(effective_mantissa_out_p2));
-
-assign effective_mantissa_out = effective_mantissa_out_p1 + effective_mantissa_out_p2; //replace with a faster adder eventually
+dadda_mul_trunc iFiMult(.x(effective_mantissa_a), .y(effective_mantissa_b), .p(effective_mantissa_out));
 
 //Stage 4 - Comput Output stored
 assign stored_sign_out = stored_sign_a ^ stored_sign_b;
 
 // For 11x11 multiplication: check bits 21 and 20 for normalization
-assign shift_factor =   ((~effective_mantissa_out[21] & ~effective_mantissa_out[20] & effective_mantissa_out[19]) ? 7'sb1111111 :
-                        (effective_mantissa_out[21]) ? 7'sb0000001 : 7'sb0000000);
+assign shift_factor =   ((~effective_mantissa_out[7] & ~effective_mantissa_out[6] & effective_mantissa_out[5]) ? 7'sb1111111 :
+                        (effective_mantissa_out[7]) ? 7'sb0000001 : 7'sb0000000);
 
 
 assign stored_exponent_out = effective_exp_out + shift_factor;
@@ -95,9 +93,9 @@ assign fp4_mant_final = ($signed(stored_exponent_out) <  0) ? 1'b0 :  // underfl
                         ($signed(stored_exponent_out) >= 4) ? 1'b1 :  // saturate  → 6.0
                          stored_mantissa_out;
 
-assign stored_mantissa_out = ((~effective_mantissa_out[21] & ~effective_mantissa_out[20] & effective_mantissa_out[19]) ? 1'b1 :
-                            ((~effective_mantissa_out[21] & effective_mantissa_out[20] & effective_mantissa_out[19]) ? 1'b1 :
-                             (effective_mantissa_out[21:20] == 2'b11) ? 1'b1 : 1'b0));
+assign stored_mantissa_out = ((~effective_mantissa_out[7] & ~effective_mantissa_out[6] & effective_mantissa_out[5]) ? 1'b1 :
+                            ((~effective_mantissa_out[7] & effective_mantissa_out[6] & effective_mantissa_out[5]) ? 1'b1 :
+                             (effective_mantissa_out[7:6] == 2'b11) ? 1'b1 : 1'b0));
 
 //Assign Output
 assign Out = (is_zero) ? 4'b0000 : {stored_sign_out, fp4_exp, fp4_mant_final};
