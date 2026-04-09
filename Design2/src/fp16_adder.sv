@@ -1,4 +1,3 @@
-`timescale 1ns / 1ps
 
 module fp16_adder (
     input  wire [15:0] op_a,

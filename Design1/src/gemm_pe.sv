@@ -22,9 +22,11 @@
 // Author: Group5
 ///////////////////////////////////////////////////////////////////////////////
 
-import gemm_pkg::*;
-
-module gemm_pe (
+module gemm_pe #(
+    localparam int ACT_WIDTH = 4,   // activation input bitwidth
+    localparam int WGT_WIDTH = 4,   // weight input bitwidth
+    localparam int ACC_WIDTH = 16   // accumulator / MAC output bitwidth
+) (
     // Global Inputs
     input  logic                    clk,
     input  logic                    rst_n,
@@ -96,7 +98,7 @@ module gemm_pe (
     //   hold    : inactive PE never corrupts accumulator
     ///////////////////////////////////////////////////////////////////////////
     always_ff @(posedge clk, negedge rst_n) begin
-        if (!rst_n) begin 
+        if (!rst_n) begin
 			acc_q <= '0;
 		end
         else if (ld_bias) begin

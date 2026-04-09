@@ -20,9 +20,14 @@
 // Author: Group5
 ///////////////////////////////////////////////////////////////////////////////
 
-import gemm_pkg::*;
-
-module gemm_control_unit (
+module gemm_control_unit #(
+    parameter ARRAY_SIZE      = 8,
+    parameter DIM_WIDTH       = 4,
+    parameter FIFO_DEPTH      = 8,
+    parameter FIFO_ADDR_WIDTH = $clog2(FIFO_DEPTH),
+    parameter MAIN_CNT_WIDTH  = 5,
+    parameter BIAS_CNT_WIDTH  = 4
+) (
     // Global Inputs
     input  logic                    clk,
     input  logic                    rst_n,

@@ -34,29 +34,38 @@
 // Author: Group5
 ///////////////////////////////////////////////////////////////////////////////
 
-import gemm_pkg::*;
-
-module gemm_systolic_array (
+module gemm_systolic_array #(
+    localparam int ARRAY_SIZE      = 8,              // 8x8 systolic array
+    localparam int ACT_WIDTH       = 4,              // activation input bitwidth
+    localparam int WGT_WIDTH       = 4,              // weight input bitwidth
+    localparam int ACC_WIDTH       = 16,             // accumulator / MAC output bitwidth
+    localparam int FIFO_DEPTH      = 8,              // entries per FIFO
+    localparam int FIFO_ADDR_WIDTH = $clog2(FIFO_DEPTH) // 3-bit address
+) (
     // Global
     input  logic                                        clk,
+    input  logic                                        rst_n,
 
     // Activation inputs (one per row, enters left edge)
-    input  logic [ACT_WIDTH-1:0]    i_col [0:ARRAY_SIZE-1],   // I_COL[row]
+    // Converted from unpacked: logic [ACT_WIDTH-1:0] i_col [0:ARRAY_SIZE-1]
+    input  logic [ARRAY_SIZE-1:0][ACT_WIDTH-1:0]   i_col,   // I_COL[row]
 
     // Weight inputs (one per column, enters top edge)
-    input  logic [WGT_WIDTH-1:0]    w_row [0:ARRAY_SIZE-1],   // W_ROW[col]
+    // Converted from unpacked: logic [WGT_WIDTH-1:0] w_row [0:ARRAY_SIZE-1]
+    input  logic [ARRAY_SIZE-1:0][WGT_WIDTH-1:0]   w_row,   // W_ROW[col]
 
     // PE enable vectors from Control Unit
-    input  logic [ARRAY_SIZE-1:0]   h_pe_en,    // horizontal enables → left col
-    input  logic [ARRAY_SIZE-1:0]   v_pe_en,    // vertical enables   → top row
+    input  logic [ARRAY_SIZE-1:0]                   h_pe_en,    // horizontal enables → left col
+    input  logic [ARRAY_SIZE-1:0]                   v_pe_en,    // vertical enables   → top row
 
     // Bias
-    input  logic [ACC_WIDTH-1:0]    bias,       // broadcast to all PEs
-    input  logic [ARRAY_SIZE-1:0]   ld_bias,    // one-hot per column
+    input  logic [ACC_WIDTH-1:0]                    bias,       // broadcast to all PEs
+    input  logic [ARRAY_SIZE-1:0]                   ld_bias,    // one-hot per column
 
     // Column select & output
     input  logic [FIFO_ADDR_WIDTH-1:0]              col_addr,   // selects output col
-    output logic [ACC_WIDTH-1:0]    col_out [0:ARRAY_SIZE-1]    // selected col ACC_OUT
+    // Converted from unpacked: logic [ACC_WIDTH-1:0] col_out [0:ARRAY_SIZE-1]
+    output logic [ARRAY_SIZE-1:0][ACC_WIDTH-1:0]   col_out     // selected col ACC_OUT
 );
 
     ///////////////////////////////////////////////////////////////////////////
@@ -66,12 +75,20 @@ module gemm_systolic_array (
     // h_en_mesh[i][j]  : horizontal enable into PE[i][j]
     // v_en_mesh[i][j]  : vertical enable into PE[i][j]
     // acc_mesh[i][j]   : accumulator output of PE[i][j]
+    //
+    // Converted from 2D unpacked to packed. Note asymmetric column/row
+    // extents (+1) to hold the east/south boundary wires:
+    //   a_mesh   [0:ARRAY_SIZE-1][0:ARRAY_SIZE]   → [ARRAY_SIZE-1:0][ARRAY_SIZE:0]
+    //   w_mesh   [0:ARRAY_SIZE  ][0:ARRAY_SIZE-1] → [ARRAY_SIZE:0][ARRAY_SIZE-1:0]
+    //   h_en_mesh[0:ARRAY_SIZE-1][0:ARRAY_SIZE]   → [ARRAY_SIZE-1:0][ARRAY_SIZE:0]
+    //   v_en_mesh[0:ARRAY_SIZE  ][0:ARRAY_SIZE-1] → [ARRAY_SIZE:0][ARRAY_SIZE-1:0]
+    //   acc_mesh [0:ARRAY_SIZE-1][0:ARRAY_SIZE-1] → [ARRAY_SIZE-1:0][ARRAY_SIZE-1:0]
     ///////////////////////////////////////////////////////////////////////////
-    logic [ACT_WIDTH-1:0]   a_mesh   [0:ARRAY_SIZE-1][0:ARRAY_SIZE];
-    logic [WGT_WIDTH-1:0]   w_mesh   [0:ARRAY_SIZE  ][0:ARRAY_SIZE-1];
-    logic                   h_en_mesh[0:ARRAY_SIZE-1][0:ARRAY_SIZE];
-    logic                   v_en_mesh[0:ARRAY_SIZE  ][0:ARRAY_SIZE-1];
-    logic [ACC_WIDTH-1:0]   acc_mesh [0:ARRAY_SIZE-1][0:ARRAY_SIZE-1];
+    logic [ARRAY_SIZE-1:0][ARRAY_SIZE:0][ACT_WIDTH-1:0]   a_mesh;
+    logic [ARRAY_SIZE:0][ARRAY_SIZE-1:0][WGT_WIDTH-1:0]   w_mesh;
+    logic [ARRAY_SIZE-1:0][ARRAY_SIZE:0]                   h_en_mesh;
+    logic [ARRAY_SIZE:0][ARRAY_SIZE-1:0]                   v_en_mesh;
+    logic [ARRAY_SIZE-1:0][ARRAY_SIZE-1:0][ACC_WIDTH-1:0]  acc_mesh;
 
     ///////////////////////////////////////////////////////////////////////////
     // Boundary connections — left column and top row inputs
@@ -113,6 +130,7 @@ module gemm_systolic_array (
             for (j = 0; j < ARRAY_SIZE; j++) begin : col_gen
                 gemm_pe pe_inst (
                     .clk      (clk),
+                    .rst_n      (rst_n),
 
                     // Horizontal
                     .a_in     (a_mesh[i][j]),

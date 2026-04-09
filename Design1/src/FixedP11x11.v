@@ -1,4 +1,3 @@
-`timescale 1ns/1ps
 module FixedP11x11 #(
     parameter INPUT_WIDTH = 11,
     parameter OUTPUT_WIDTH = 22

@@ -11,9 +11,11 @@
 // Author: Group5
 ///////////////////////////////////////////////////////////////////////////////
 
-import gemm_pkg::*;
-
-module gemm_fifo (
+module gemm_fifo #(
+    parameter ACT_WIDTH       = 4,
+    parameter FIFO_DEPTH      = 8,
+    parameter FIFO_ADDR_WIDTH = $clog2(FIFO_DEPTH)
+) (
     // Global
     input  logic                    clk,
     input  logic                    rst_n,
@@ -28,10 +30,11 @@ module gemm_fifo (
     output logic [ACT_WIDTH-1:0]    data_out    // output data to systolic array
 );
 
+
     ///////////////////////////////////////////////////////////////////////////
     // FIFO Memory
     ///////////////////////////////////////////////////////////////////////////
-    logic [ACT_WIDTH-1:0] fifo_mem [0:FIFO_DEPTH-1];
+    logic [FIFO_DEPTH-1:0][ACT_WIDTH-1:0] fifo_mem;
 
     ///////////////////////////////////////////////////////////////////////////
     // Internal Read Pointer (permanent)

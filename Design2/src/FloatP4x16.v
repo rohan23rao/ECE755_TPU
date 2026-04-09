@@ -1,4 +1,3 @@
-`timescale 1ns/1ps
 module FloatP4x16 #(
     parameter INPUT_WIDTH = 4,
     parameter OUTPUT_WIDTH = 16
@@ -57,15 +56,17 @@ assign is_norm_a = (|stored_exp_a);
 assign is_norm_b = (|stored_exp_b);
 assign is_zero = (A[INPUT_WIDTH-2:0] == 0 || B[INPUT_WIDTH-2:0] == 0); //dont check sign -0 = 0
 
-//Stage 2 - Calculate Input effectives
-assign effective_exp_a = (is_norm_a) ? (stored_exp_a - FP4_BIAS) : (1-FP4_BIAS);
-assign effective_exp_b = (is_norm_b) ? (stored_exp_b - FP4_BIAS) : (1-FP4_BIAS);
+//Stage 2 - Calculate Input effectives (bias-free, mux selects 0 for subnormals)
+wire [INPUT_EXPONENT_BITS-1:0] unbiased_exp_a, unbiased_exp_b;
+assign unbiased_exp_a = (is_norm_a) ? stored_exp_a : {INPUT_EXPONENT_BITS{1'b0}};
+assign unbiased_exp_b = (is_norm_b) ? stored_exp_b : {INPUT_EXPONENT_BITS{1'b0}};
 
 assign effective_mantissa_a = {is_norm_a, stored_mantissa_a};
 assign effective_mantissa_b = {is_norm_b, stored_mantissa_b};
 
-//Stage 3 - Compute Output effectives
-assign effective_exp_out = {3'b000, effective_exp_a} + {3'b000, effective_exp_b} + FP16_BIAS;
+//Stage 3 - Compute Output effectives (FP16_BIAS - 2*FP4_BIAS = 13, pre-computed constant)
+localparam COMBINED_BIAS = FP16_BIAS - 2*FP4_BIAS; // = 13, resolved at compile time
+assign effective_exp_out = {3'b000, unbiased_exp_a} + {3'b000, unbiased_exp_b} + COMBINED_BIAS;
 
 //Update the run_main.sh script with the right module if youre using verilator
 //FixedP2x4 iFiMult(.A(effective_mantissa_a), .B(effective_mantissa_b), .Out(effective_mantissa_out));

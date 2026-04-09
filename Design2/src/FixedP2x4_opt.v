@@ -1,4 +1,3 @@
-`timescale 1ns/1ps
 module FixedP2x4_opt (
     input [1:0]     A,
     input [1:0]     B,

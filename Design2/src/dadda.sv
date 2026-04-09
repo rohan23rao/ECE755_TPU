@@ -5,10 +5,8 @@ module dadda
   output logic [21 : 0] z0,
   output logic [21 : 0] z1
 );
-  timeunit 1ps;
-  timeprecision 1ps;
 
-  logic [10 : 0] P [0 : 10];
+  logic [10:0][10:0] P;
 
   logic [89 : 0] S;
   logic [89 : 0] C;

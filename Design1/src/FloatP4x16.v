@@ -1,4 +1,3 @@
-`timescale 1ns/1ps
 module FloatP4x16 #(
     parameter INPUT_WIDTH = 4,
     parameter OUTPUT_WIDTH = 16
@@ -68,8 +67,8 @@ assign effective_mantissa_b = {is_norm_b, stored_mantissa_b};
 assign effective_exp_out = {3'b000, effective_exp_a} + {3'b000, effective_exp_b} + FP16_BIAS;
 
 //Update the run_main.sh script with the right module if youre using verilator
-//FixedP2x4 iFiMult(.A(effective_mantissa_a), .B(effective_mantissa_b), .Out(effective_mantissa_out));
-FixedP2x4_opt iFiMult(.A(effective_mantissa_a), .B(effective_mantissa_b), .Out(effective_mantissa_out));
+FixedP2x4 iFiMult(.A(effective_mantissa_a), .B(effective_mantissa_b), .Out(effective_mantissa_out));
+//FixedP2x4_opt iFiMult(.A(effective_mantissa_a), .B(effective_mantissa_b), .Out(effective_mantissa_out));
 
 //Stage 4 - Comput Output stored
 assign stored_sign_out = stored_sign_a ^ stored_sign_b;

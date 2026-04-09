@@ -1,4 +1,3 @@
-`timescale 1ns / 1ps
 
 (* keep *)
 module ks_sub14 (
@@ -95,7 +94,6 @@ module ks_addsub15 (
 
 endmodule
 
-`timescale 1ns / 1ps
 
 (* keep = 1 *)
 module lod_tree_14 (
@@ -211,7 +209,6 @@ endmodule
 
 // endmodule
 
-`timescale 1ns / 1ps
 
 (* keep = 1 *)
 module dual_round_11 (

@@ -21,9 +21,16 @@
 // Author: Group5
 ///////////////////////////////////////////////////////////////////////////////
 
-import gemm_pkg::*;
-
-module gemm_top (
+module gemm_top #(
+    parameter ARRAY_SIZE      = 8,
+    parameter ACT_WIDTH       = 4,
+    parameter WGT_WIDTH       = 4,
+    parameter ACC_WIDTH       = 16,
+    parameter OUT_WIDTH       = 4,
+    parameter FIFO_DEPTH      = 8,
+    parameter FIFO_ADDR_WIDTH = $clog2(FIFO_DEPTH),
+    parameter DIM_WIDTH       = 4
+) (
     // Global
     input  logic                        clk,
     input  logic                        rst_n,
@@ -62,10 +69,10 @@ module gemm_top (
 
     // Data Inputs
     // Activation data — one 4-bit value per FIFO row, 8 rows
-    input  logic [ACT_WIDTH-1:0]        A_DATA [0:ARRAY_SIZE-1],
+    input  logic [ARRAY_SIZE-1:0][ACT_WIDTH-1:0]   A_DATA,
 
     // Weight data — one 4-bit value per FIFO col, 8 cols
-    input  logic [WGT_WIDTH-1:0]        W_DATA [0:ARRAY_SIZE-1],
+    input  logic [ARRAY_SIZE-1:0][WGT_WIDTH-1:0]   W_DATA,
 
     // Bias — FP16 broadcast value loaded into systolic array accumulators
     input  logic [ACC_WIDTH-1:0]        BIAS,
@@ -75,8 +82,9 @@ module gemm_top (
 
     // Data Output
     // Quantized output — one OUT_WIDTH value per row, 8 rows
-    output logic [OUT_WIDTH-1:0]        Y_OUT [0:ARRAY_SIZE-1]
+    output logic [ARRAY_SIZE-1:0][OUT_WIDTH-1:0]   Y_OUT
 );
+
 
     ///////////////////////////////////////////////////////////////////////////
     // Internal wires — Control Unit outputs
@@ -104,13 +112,13 @@ module gemm_top (
     ///////////////////////////////////////////////////////////////////////////
 
     // Activation FIFO → Systolic Array
-    logic [ACT_WIDTH-1:0]           i_col [0:ARRAY_SIZE-1];
+    logic [ARRAY_SIZE-1:0][ACT_WIDTH-1:0]  i_col;
 
     // Weight FIFO → Systolic Array
-    logic [WGT_WIDTH-1:0]           w_row [0:ARRAY_SIZE-1];
+    logic [ARRAY_SIZE-1:0][WGT_WIDTH-1:0]  w_row;
 
     // Systolic Array → Vector Unit
-    logic [ACC_WIDTH-1:0]           col_out [0:ARRAY_SIZE-1];
+    logic [ARRAY_SIZE-1:0][ACC_WIDTH-1:0]  col_out;
 
     ///////////////////////////////////////////////////////////////////////////
     // Control Unit

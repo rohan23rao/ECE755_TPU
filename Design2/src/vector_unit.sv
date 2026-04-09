@@ -6,16 +6,16 @@ module gemm_vector_unit #(
     input logic clk,
     input logic relu_en,
     input logic  [LANES-1:0] quant_en,  // Per-lane quantization enable signals
-    input logic  [FP16_WIDTH- 1:0] col_out [0:LANES-1], // 8 FP16 input data
-    input logic  [FP16_WIDTH - 1:0] scale,        // 1 FP16 data for one cycle, quantize column by column
+    input logic  [LANES-1:0][FP16_WIDTH-1:0] col_out,  // 8 FP16 input data
+    input logic  [FP16_WIDTH-1:0]            scale,    // 1 FP16 data for one cycle, quantize column by column
 
-    output logic [FP4_WIDTH - 1:0] y_out[0:LANES-1]           // 8 FP4 quantized output data
+    output logic [LANES-1:0][FP4_WIDTH-1:0]  y_out     // 8 FP4 quantized output data
 );
 
-logic  [FP16_WIDTH-1:0] quant_in   [LANES - 1:0];      // Muxed input for quantization
-logic  [FP16_WIDTH-1:0] quant_scale[LANES - 1:0];      // Muxed scale for quantization
-logic  [FP4_WIDTH-1:0]  reg_out    [LANES - 1:0];      // Register to hold quantized output after RELU
-logic  [FP4_WIDTH-1:0]  mult_out   [LANES - 1:0];      // Output of the FP16 multiplication before quantization
+logic [LANES-1:0][FP16_WIDTH-1:0] quant_in;    // Muxed input for quantization
+logic [LANES-1:0][FP16_WIDTH-1:0] quant_scale;  // Muxed scale for quantization
+logic [LANES-1:0][FP4_WIDTH-1:0]  reg_out;      // Register to hold quantized output after RELU
+logic [LANES-1:0][FP4_WIDTH-1:0]  mult_out;     // Output of the FP16 multiplication before quantization
 
 genvar i;
 generate 

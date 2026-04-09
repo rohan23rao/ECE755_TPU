@@ -20,9 +20,14 @@
 // Author: Group5
 ///////////////////////////////////////////////////////////////////////////////
 
-import gemm_pkg::*;
-
-module gemm_control_unit (
+module gemm_control_unit #(
+    localparam int ARRAY_SIZE      = 8,              // 8x8 systolic array
+    localparam int DIM_WIDTH       = 4,              // 4-bit dimension inputs {1-8}
+    localparam int FIFO_DEPTH      = 8,              // entries per FIFO
+    localparam int FIFO_ADDR_WIDTH = $clog2(FIFO_DEPTH), // 3-bit address
+    localparam int MAIN_CNT_WIDTH  = 5,              // main_cnt: covers A+W+K-3 max=21
+    localparam int BIAS_CNT_WIDTH  = 4               // bias_cnt: covers W_DIM max=8
+) (
     // Global Inputs
     input  logic                    clk,
     input  logic                    rst_n,
@@ -89,7 +94,7 @@ module gemm_control_unit (
     logic        bias_load_done;
     logic        compute_done;
     logic        flush_done;
-	
+
 	gemm_fsm u_gemm_fsm (
         .clk              (clk),
         .rst_n            (rst_n),
@@ -169,9 +174,9 @@ module gemm_control_unit (
                               MAIN_CNT_WIDTH'(3);
         end
     end
-	
-	
-	
+
+
+
 	///////////////////////////////////////////////////////////////////////////
     // Counters
     // main_cnt [4:0] : shared across LOAD_FIFO, GEMM_COMPUTE, GEMM_FLUSH
@@ -201,9 +206,9 @@ module gemm_control_unit (
 			bias_cnt <= bias_cnt + 4'd1;
 		end
     end
-	
-	
-	
+
+
+
 	///////////////////////////////////////////////////////////////////////////
     // Done Signal Generation
     //
@@ -243,7 +248,7 @@ module gemm_control_unit (
     assign pe_shift_in = (main_cnt < MAIN_CNT_WIDTH'(K_DIM_r));
 
     always_ff @(posedge clk, negedge rst_n) begin
-        if (!rst_n) begin 
+        if (!rst_n) begin
 			pe_wave <= '0;
 		end
         else if (clr_pe_wave) begin
@@ -253,9 +258,9 @@ module gemm_control_unit (
 			pe_wave <= {pe_wave[ARRAY_SIZE-2:0], pe_shift_in};
 		end
     end
-	
-	
-	
+
+
+
 	///////////////////////////////////////////////////////////////////////////
     // 8-bit Vector Generation
     //
@@ -304,9 +309,9 @@ module gemm_control_unit (
     // SCALE_RDY — direct pass-through
     ///////////////////////////////////////////////////////////////////////////
     assign SCALE_RDY = Y_RDY;
-	
-	
-	
+
+
+
 	///////////////////////////////////////////////////////////////////////////
     // Address Generation
     // WR_ADDR  : FIFO write address in LOAD_FIFO  = main_cnt[2:0]

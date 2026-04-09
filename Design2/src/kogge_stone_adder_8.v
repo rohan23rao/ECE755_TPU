@@ -1,4 +1,3 @@
-`timescale 1ns / 1ps
 
 module kogge_stone_adder_8bit (
     input logic [7:0] A,

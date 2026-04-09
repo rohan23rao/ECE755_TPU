@@ -1,5 +1,3 @@
-import configure::*;
-
 module fa
 (
 	input  logic [0 : 0] a,
@@ -8,8 +6,6 @@ module fa
 	output logic [0 : 0] s,
 	output logic [0 : 0] c_o
 );
-	timeunit 1ps;
-	timeprecision 1ps;
 
 	logic s_1,c_1,c_2;
 

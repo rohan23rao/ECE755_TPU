@@ -1,4 +1,3 @@
-`timescale 1ns / 1ps
 
 module fp16_adder_truncation_pipe (
     input  wire        clk,

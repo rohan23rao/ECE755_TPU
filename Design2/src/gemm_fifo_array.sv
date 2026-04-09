@@ -16,22 +16,25 @@
 // Author: Group5
 ///////////////////////////////////////////////////////////////////////////////
 
-import gemm_pkg::*;
-
-module gemm_fifo_array (
+module gemm_fifo_array #(
+    parameter ARRAY_SIZE      = 8,
+    parameter ACT_WIDTH       = 4,
+    parameter FIFO_ADDR_WIDTH = $clog2(8)
+) (
     // Global
     input  logic                        clk,
     input  logic                        rst_n,
 
     // Write Port
-    input  logic [ACT_WIDTH-1:0]        data_in  [0:ARRAY_SIZE-1],
-    input  logic [ARRAY_SIZE-1:0]       write_en,   // from A/W_IN_EN
-	input logic [FIFO_ADDR_WIDTH-1:0]	write_ptr,
+    input  logic [ARRAY_SIZE-1:0][ACT_WIDTH-1:0]  data_in,
+    input  logic [ARRAY_SIZE-1:0]                  write_en,   // from A/W_IN_EN
+	input  logic [FIFO_ADDR_WIDTH-1:0]             write_ptr,
 
     // Read Port
-    input  logic [ARRAY_SIZE-1:0]       read_en,    // from A/W_OUT_EN
-    output logic [ACT_WIDTH-1:0]        data_out [0:ARRAY_SIZE-1]
+    input  logic [ARRAY_SIZE-1:0]                  read_en,    // from A/W_OUT_EN
+    output logic [ARRAY_SIZE-1:0][ACT_WIDTH-1:0]   data_out
 );
+
 
     ///////////////////////////////////////////////////////////////////////////
     // Generate ARRAY_SIZE gemm_fifo instances

@@ -16,20 +16,23 @@
 // Author: Group5
 ///////////////////////////////////////////////////////////////////////////////
 
-import gemm_pkg::*;
-
-module gemm_fifo_array (
+module gemm_fifo_array #(
+    localparam int ARRAY_SIZE = 8,   // 8x8 systolic array
+    localparam int ACT_WIDTH  = 4    // activation/weight input bitwidth
+) (
     // Global
-    input  logic                        clk,
-    input  logic                        rst_n,
+    input  logic                                    clk,
+    input  logic                                    rst_n,
 
     // Write Port
-    input  logic [ACT_WIDTH-1:0]        data_in  [0:ARRAY_SIZE-1],
-    input  logic [ARRAY_SIZE-1:0]       write_en,   // from A/W_IN_EN
+    // Converted from unpacked: logic [ACT_WIDTH-1:0] data_in [0:ARRAY_SIZE-1]
+    input  logic [ARRAY_SIZE-1:0][ACT_WIDTH-1:0]   data_in,
+    input  logic [ARRAY_SIZE-1:0]                   write_en,   // from A/W_IN_EN
 
     // Read Port
-    input  logic [ARRAY_SIZE-1:0]       read_en,    // from A/W_OUT_EN
-    output logic [ACT_WIDTH-1:0]        data_out [0:ARRAY_SIZE-1]
+    input  logic [ARRAY_SIZE-1:0]                   read_en,    // from A/W_OUT_EN
+    // Converted from unpacked: logic [ACT_WIDTH-1:0] data_out [0:ARRAY_SIZE-1]
+    output logic [ARRAY_SIZE-1:0][ACT_WIDTH-1:0]   data_out
 );
 
     ///////////////////////////////////////////////////////////////////////////

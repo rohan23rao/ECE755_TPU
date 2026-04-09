@@ -33,9 +33,11 @@
 // Author: Group5
 ///////////////////////////////////////////////////////////////////////////////
 
-import gemm_pkg::*;
-
-module gemm_pe (
+module gemm_pe #(
+    parameter ACT_WIDTH = 4,
+    parameter WGT_WIDTH = 4,
+    parameter ACC_WIDTH = 16
+) (
     // Global
     input  logic                    clk,
 
@@ -62,6 +64,7 @@ module gemm_pe (
     // ── Accumulator output ────────────────────────────────────────────────
     output logic [ACC_WIDTH-1:0]    acc_out
 );
+
 
     ///////////////////////////////////////////////////////////////////////////
     // PE enable — combinational

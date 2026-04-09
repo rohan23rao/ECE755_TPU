@@ -21,9 +21,16 @@
 // Author: Group5
 ///////////////////////////////////////////////////////////////////////////////
 
-import gemm_pkg::*;
-
-module gemm_top (
+module gemm_top #(
+    localparam int ARRAY_SIZE      = 8,              // 8x8 systolic array
+    localparam int ACT_WIDTH       = 4,              // activation input bitwidth
+    localparam int WGT_WIDTH       = 4,              // weight input bitwidth
+    localparam int ACC_WIDTH       = 16,             // accumulator / MAC output bitwidth
+    localparam int OUT_WIDTH       = 4,              // quantized output bitwidth
+    localparam int DIM_WIDTH       = 4,              // 4-bit dimension inputs {1-8}
+    localparam int FIFO_DEPTH      = 8,              // entries per FIFO
+    localparam int FIFO_ADDR_WIDTH = $clog2(FIFO_DEPTH) // 3-bit address
+) (
     // Global
     input  logic                        clk,
     input  logic                        rst_n,
@@ -62,10 +69,12 @@ module gemm_top (
 
     // Data Inputs
     // Activation data — one 4-bit value per FIFO row, 8 rows
-    input  logic [ACT_WIDTH-1:0]        A_DATA [0:ARRAY_SIZE-1],
+    // Converted from unpacked: logic [ACT_WIDTH-1:0] A_DATA [0:ARRAY_SIZE-1]
+    input  logic [ARRAY_SIZE-1:0][ACT_WIDTH-1:0]   A_DATA,
 
     // Weight data — one 4-bit value per FIFO col, 8 cols
-    input  logic [WGT_WIDTH-1:0]        W_DATA [0:ARRAY_SIZE-1],
+    // Converted from unpacked: logic [WGT_WIDTH-1:0] W_DATA [0:ARRAY_SIZE-1]
+    input  logic [ARRAY_SIZE-1:0][WGT_WIDTH-1:0]   W_DATA,
 
     // Bias — FP16 broadcast value loaded into systolic array accumulators
     input  logic [ACC_WIDTH-1:0]        BIAS,
@@ -75,7 +84,8 @@ module gemm_top (
 
     // Data Output
     // Quantized output — one OUT_WIDTH value per row, 8 rows
-    output logic [OUT_WIDTH-1:0]        Y_OUT [0:ARRAY_SIZE-1]
+    // Converted from unpacked: logic [OUT_WIDTH-1:0] Y_OUT [0:ARRAY_SIZE-1]
+    output logic [ARRAY_SIZE-1:0][OUT_WIDTH-1:0]   Y_OUT
 );
 
     ///////////////////////////////////////////////////////////////////////////
@@ -104,13 +114,16 @@ module gemm_top (
     ///////////////////////////////////////////////////////////////////////////
 
     // Activation FIFO → Systolic Array
-    logic [ACT_WIDTH-1:0]           i_col [0:ARRAY_SIZE-1];
+    // Converted from unpacked: logic [ACT_WIDTH-1:0] i_col [0:ARRAY_SIZE-1]
+    logic [ARRAY_SIZE-1:0][ACT_WIDTH-1:0]   i_col;
 
     // Weight FIFO → Systolic Array
-    logic [WGT_WIDTH-1:0]           w_row [0:ARRAY_SIZE-1];
+    // Converted from unpacked: logic [WGT_WIDTH-1:0] w_row [0:ARRAY_SIZE-1]
+    logic [ARRAY_SIZE-1:0][WGT_WIDTH-1:0]   w_row;
 
     // Systolic Array → Vector Unit
-    logic [ACC_WIDTH-1:0]           col_out [0:ARRAY_SIZE-1];
+    // Converted from unpacked: logic [ACC_WIDTH-1:0] col_out [0:ARRAY_SIZE-1]
+    logic [ARRAY_SIZE-1:0][ACC_WIDTH-1:0]   col_out;
 
     ///////////////////////////////////////////////////////////////////////////
     // Control Unit
@@ -169,7 +182,6 @@ module gemm_top (
         .rst_n      (rst_n),
         .data_in    (A_DATA),
         .write_en   (a_in_en),
-        .write_ptr  (wr_addr),
         .read_en    (a_out_en),
         .data_out   (i_col)
     );
@@ -186,7 +198,6 @@ module gemm_top (
         .rst_n      (rst_n),
         .data_in    (W_DATA),
         .write_en   (w_in_en),
-        .write_ptr  (wr_addr),
         .read_en    (w_out_en),
         .data_out   (w_row)
     );
@@ -199,6 +210,7 @@ module gemm_top (
     ///////////////////////////////////////////////////////////////////////////
     gemm_systolic_array u_systolic_array (
         .clk        (clk),
+        .rst_n      (rst_n),
         .i_col      (i_col),
         .w_row      (w_row),
         .h_pe_en    (h_pe_en),
@@ -225,14 +237,14 @@ module gemm_top (
     //         .relu_en    (relu_en_out) // 1-bit
     //         .y_out      (Y_OUT)       // [OUT_WIDTH-1:0][0:ARRAY_SIZE-1]
     ///////////////////////////////////////////////////////////////////////////
-    gemm_vector_unit u_vector_unit (
-        .clk        (clk),
-        .rst_n      (rst_n),
-        .col_out    (col_out),
-        .scale      (SCALE),
-        .scale_vld  (SCALE_VLD),
-        .quant_en   (quant_en),
-        .relu_en    (relu_en_out),
-        .y_out      (Y_OUT)
-    );
+    vector_unit u_vector_unit (
+	    .clk(clk),
+	    .rst_n(rst_n),
+	    .relu_en(relu_en_out),
+	    .quant_en(quant_en), 
+	    .data_in(col_out), 
+	    .scale_data(SCALE),
+	    .data_out(Y_OUT)
+     );
+
 endmodule
