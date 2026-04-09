@@ -7,13 +7,13 @@ module fp16_adder (
 
     // Unpack op_a
     wire sa = op_a[15];
-    wire [4:0]  ea = op_a[14:10];
-    wire [9:0]  ma = op_a[9:0];
+    wire [4:0] ea = op_a[14:10];
+    wire [9:0] ma = op_a[9:0];
 
     // Unpack op_b
     wire sb = op_b[15];
-    wire [4:0]  eb = op_b[14:10];
-    wire [9:0]  mb = op_b[9:0];
+    wire [4:0] eb = op_b[14:10];
+    wire [9:0] mb = op_b[9:0];
 
     // Zero, Inf, and Nan checks
     wire a_is_zero = (ea == 5'd0)  && (ma == 10'd0);
