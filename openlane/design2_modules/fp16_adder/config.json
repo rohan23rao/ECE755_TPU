@@ -1,0 +1,18 @@
+{
+  "DESIGN_NAME": "fp16_adder",
+  "VERILOG_FILES": "dir::src/fp16_adder_helpers.v src/kogge_stone_adder_8.v src/fp16_adder.sv",
+  "FP_CORE_UTIL": 45,
+  "PL_TARGET_DENSITY": "expr::($FP_CORE_UTIL + 5) / 100.0",
+  "RT_MAX_LAYER": "met3",
+  "CLOCK_PERIOD": 100.0,
+  "STA_CORNERS": [
+    "nom_tt_025C_1v80",
+    "min_ss_100C_1v60",
+    "max_ff_n40C_1v95"
+  ],
+  "QUIT_ON_TIMING_VIOLATIONS": false,
+  "pdk::sky130A": {
+    "MAX_FANOUT_CONSTRAINT": 8,
+    "scl::sky130_fd_sc_hd": {}
+  }
+}

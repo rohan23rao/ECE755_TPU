@@ -1,0 +1,17 @@
+{
+  "DESIGN_NAME": "FloatP16x4",
+  "VERILOG_FILES": "dir::src/ha.sv src/fa.sv src/dadda_reduced.sv src/dadda_mul_trunc.sv src/FloatP16x4.v",
+  "FP_CORE_UTIL": 40,
+  "PL_TARGET_DENSITY": "expr::($FP_CORE_UTIL + 5) / 100.0",
+  "RT_MAX_LAYER": "met3",
+  "CLOCK_PERIOD": 100.0,
+  "STA_CORNERS": [
+    "nom_tt_025C_1v80",
+    "min_ss_100C_1v60",
+    "max_ff_n40C_1v95"
+  ],
+  "QUIT_ON_TIMING_VIOLATIONS": false,
+  "pdk::sky130A": {
+    "MAX_FANOUT_CONSTRAINT": 8
+  }
+}
