@@ -1,0 +1,23 @@
+{
+  "DESIGN_NAME": "gemm_top",
+  "VERILOG_FILES": "dir::src/gemm_pkg.sv src/gemm_top.sv src/gemm_control_unit.sv src/gemm_fsm.sv src/gemm_systolic_array.sv src/gemm_fifo.sv src/gemm_fifo_array.sv src/vector_unit.sv src/FloatP16x4.v src/dadda_mul_trunc.sv src/dadda_reduced.sv src/ha.sv src/fa.sv",
+  "VERILOG_FILES_BLACKBOX": [
+    ">>> AFTER PE RUN: point to runs/RUN_<tag>/final/netlist/gemm_pe.v <<<"
+  ],
+  "EXTRA_LEFS": [
+    ">>> AFTER PE RUN: point to runs/RUN_<tag>/final/lef/gemm_pe.lef <<<"
+  ],
+  "EXTRA_GDS_FILES": [
+    ">>> AFTER PE RUN: point to runs/RUN_<tag>/final/gds/gemm_pe.gds <<<"
+  ],
+  "CLOCK_PORT": "clk",
+  "CLOCK_PERIOD": 27.0,
+  "pdk::sky130A": {
+    "FP_CORE_UTIL": 70,
+    "PL_TARGET_DENSITY_PCT": 50,
+    "MAX_FANOUT_CONSTRAINT": 128,
+    "scl::sky130_fd_sc_hd": {
+      "CLOCK_PERIOD": 27.0
+    }
+  }
+}

@@ -1,0 +1,14 @@
+{
+  "DESIGN_NAME": "gemm_top",
+  "VERILOG_FILES": "dir::src/*",
+  "CLOCK_PORT": "clk",
+  "CLOCK_PERIOD": 27.0,
+  "pdk::sky130A": {
+    "FP_CORE_UTIL": 40,
+    "PL_TARGET_DENSITY_PCT": 50,
+    "MAX_FANOUT_CONSTRAINT": 128,
+    "scl::sky130_fd_sc_hd": {
+      "CLOCK_PERIOD": 27.0
+    }
+  }
+}
