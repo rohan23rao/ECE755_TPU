@@ -1,4 +1,4 @@
-module gemm_vector_unit #(
+module vector_unit #(
     parameter int FP16_WIDTH = 16, // FP16 scale factor
     parameter int FP4_WIDTH = 4,   // FP4 quantization width
     parameter int LANES = 8        // Number of parallel lanes

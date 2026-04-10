@@ -123,7 +123,7 @@ module gemm_pe #(
     logic [ACC_WIDTH-1:0] acc_q;
     logic [ACC_WIDTH-1:0] add_result;
 
-    fp16_adder u_fp16_add (
+    fp16_adder_truncation u_fp16_add (
         .op_a   (mul_out_q),
         .op_b   (acc_q),
         .result (add_result)

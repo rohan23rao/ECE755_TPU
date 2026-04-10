@@ -237,9 +237,8 @@ module gemm_top #(
     // Handshake signals (SCALE_VLD, SCALE_RDY, Y_RDY, Y_VLD) are handled
     // entirely by the FSM — the vector unit receives only data and enables.
     ///////////////////////////////////////////////////////////////////////////
-    gemm_vector_unit u_vector_unit (
+    vector_unit u_vector_unit (
         .clk        (clk),
-        .rst_n      (rst_n),
         .col_out    (col_out),
         .scale      (SCALE),
         .quant_en   (quant_en),

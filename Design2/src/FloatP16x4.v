@@ -61,15 +61,19 @@ assign is_norm_a = (|stored_exp_a);
 assign is_norm_b = (|stored_exp_b);
 assign is_zero = (A[INPUT_WIDTH-2:0] == 0 || B[INPUT_WIDTH-2:0] == 0); //dont check sign -0 = 0
 
-//Stage 2 - Calculate Input effectives
-assign effective_exp_a = (is_norm_a) ? ($signed({2'b00, stored_exp_a}) - $signed({2'b00, FP16_BIAS})) : 7'sb1110010; // 1-bias= -14 (signed)
-assign effective_exp_b = (is_norm_b) ? ($signed({2'b00, stored_exp_b}) - $signed({2'b00, FP16_BIAS})) : 7'sb1110010;
+//Stage 2 - Calculate Input effectives (bias-free, subnormal contributes -14)
+wire signed [INPUT_EXPONENT_BITS+1:0] unbiased_exp_a, unbiased_exp_b;
+localparam signed [INPUT_EXPONENT_BITS+1:0] SUBNORM_EXP = 7'sb1110010; // 1 - FP16_BIAS = -14, unchanged
+assign unbiased_exp_a = (is_norm_a) ? $signed({2'b00, stored_exp_a}) : SUBNORM_EXP;
+assign unbiased_exp_b = (is_norm_b) ? $signed({2'b00, stored_exp_b}) : SUBNORM_EXP;
 
 assign effective_mantissa_a = {is_norm_a, stored_mantissa_a};
 assign effective_mantissa_b = {is_norm_b, stored_mantissa_b};
 
-//Stage 3 - Compute Output effectives
-assign effective_exp_out = effective_exp_a + effective_exp_b + FP4_BIAS; //FP4 Bias
+//Stage 3 - Compute Output effectives (FP4_BIAS - 2*FP16_BIAS = -29, pre-computed constant)
+localparam signed [INPUT_EXPONENT_BITS+1:0] COMBINED_BIAS = FP4_BIAS - 2*FP16_BIAS; // = -29
+assign effective_exp_out = unbiased_exp_a + unbiased_exp_b + COMBINED_BIAS;
+
 
 dadda_mul_trunc iFiMult(.x(effective_mantissa_a), .y(effective_mantissa_b), .p(effective_mantissa_out));
 
