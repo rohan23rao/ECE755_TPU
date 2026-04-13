@@ -1,13 +1,12 @@
 {
-  "DESIGN_NAME": "gemm_fifo_array",
+  "DESIGN_NAME": "fp16_adder_truncation_pipe",
   "VERILOG_FILES": [
-    "dir::src/gemm_pkg.sv",
-    "dir::src/gemm_fifo.sv",
-    "dir::src/gemm_fifo_array.sv"
+    "dir::src/fp16_adder_helpers.v",
+    "dir::src/fp16_adder_truncation_pipe.sv"
   ],
   "CLOCK_PORT": "clk",
-  "CLOCK_PERIOD": 13.0,
-  "FP_CORE_UTIL": 50,
+  "CLOCK_PERIOD": 20.0,
+  "FP_CORE_UTIL": 45,
   "PL_TARGET_DENSITY_PCT": "expr::$FP_CORE_UTIL + 5",
   "RT_MAX_LAYER": "met3",
   "STA_CORNERS": [
@@ -18,7 +17,7 @@
   "pdk::sky130A": {
     "MAX_FANOUT_CONSTRAINT": 8,
     "scl::sky130_fd_sc_hd": {
-      "CLOCK_PERIOD": 13.0
+      "CLOCK_PERIOD": 20.0
     }
   }
 }

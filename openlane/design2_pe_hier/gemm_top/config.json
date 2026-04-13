@@ -1,0 +1,51 @@
+{
+  "DESIGN_NAME": "gemm_top",
+  "VERILOG_FILES": [
+    "dir::src/gemm_pkg.sv",
+    "dir::src/gemm_top.sv",
+    "dir::src/gemm_control_unit.sv",
+    "dir::src/gemm_fsm.sv",
+    "dir::src/gemm_systolic_array.sv",
+    "dir::src/gemm_fifo.sv",
+    "dir::src/gemm_fifo_array.sv",
+    "dir::src/vector_unit.sv",
+    "dir::src/FloatP16x4.v",
+    "dir::src/dadda_mul_trunc.sv",
+    "dir::src/dadda_reduced.sv",
+    "dir::src/ha.sv",
+    "dir::src/fa.sv",
+    "dir::src/gemm_pe_bbox.v"
+  ],
+  "EXTRA_LEFS": [
+    "/home/rohan/ECE755_TPU/openlane/design2_pe_hier/gemm_pe/runs/pe_u68_m4_pins2/final/lef/gemm_pe.lef"
+  ],
+  "EXTRA_GDS_FILES": [
+    "/home/rohan/ECE755_TPU/openlane/design2_pe_hier/gemm_pe/runs/pe_u68_m4_pins2/final/gds/gemm_pe.gds"
+  ],
+  "CLOCK_PORT": "clk",
+  "CLOCK_PERIOD": 20.0,
+  "FP_CORE_UTIL": 40,
+  "PL_TARGET_DENSITY_PCT": "expr::$FP_CORE_UTIL + 10",
+  "GRT_ALLOW_CONGESTION": true,
+  "PL_MACRO_CHANNEL": "2 2",
+  "PL_MACRO_HALO": "5 5",
+  "MACRO_PLACEMENT_CFG": "dir::macro_placement.cfg",
+  "FP_PDN_HPITCH": 75,
+  "FP_PDN_VPITCH": 75,
+  "STA_CORNERS": [
+    "nom_tt_025C_1v80",
+    "min_ss_100C_1v60",
+    "max_ff_n40C_1v95"
+  ],
+  "pdk::sky130A": {
+    "MAX_FANOUT_CONSTRAINT": 10,
+    "scl::sky130_fd_sc_hd": {
+      "CLOCK_PERIOD": 20.0
+    }
+  },
+  "EXTRA_LIBS": [
+    "/home/rohan/ECE755_TPU/openlane/design2_pe_hier/gemm_pe/runs/pe_u68_m4_pins2/final/lib/max_ff_n40C_1v95/gemm_pe__max_ff_n40C_1v95.lib",
+    "/home/rohan/ECE755_TPU/openlane/design2_pe_hier/gemm_pe/runs/pe_u68_m4_pins2/final/lib/min_ss_100C_1v60/gemm_pe__min_ss_100C_1v60.lib",
+    "/home/rohan/ECE755_TPU/openlane/design2_pe_hier/gemm_pe/runs/pe_u68_m4_pins2/final/lib/nom_tt_025C_1v80/gemm_pe__nom_tt_025C_1v80.lib"
+  ]
+}

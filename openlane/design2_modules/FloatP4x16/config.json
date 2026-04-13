@@ -1,8 +1,11 @@
 {
   "DESIGN_NAME": "FloatP4x16",
-  "VERILOG_FILES": "dir::src/FixedP2x4_opt.v src/FloatP4x16.v",
-  "FP_CORE_UTIL": 40,
-  "PL_TARGET_DENSITY": "expr::($FP_CORE_UTIL + 5) / 100.0",
+  "VERILOG_FILES": [
+    "dir::src/FixedP2x4_opt.v",
+    "dir::src/FloatP4x16.v"
+  ],
+  "FP_CORE_UTIL": 60,
+  "PL_TARGET_DENSITY_PCT": "expr::$FP_CORE_UTIL + 10",
   "RT_MAX_LAYER": "met3",
   "CLOCK_PERIOD": 100.0,
   "STA_CORNERS": [
@@ -10,7 +13,6 @@
     "min_ss_100C_1v60",
     "max_ff_n40C_1v95"
   ],
-  "QUIT_ON_TIMING_VIOLATIONS": false,
   "pdk::sky130A": {
     "MAX_FANOUT_CONSTRAINT": 8
   }

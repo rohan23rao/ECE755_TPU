@@ -1,17 +1,23 @@
 {
   "DESIGN_NAME": "gemm_vector_unit",
-  "VERILOG_FILES": "dir::src/ha.sv src/fa.sv src/dadda_reduced.sv src/dadda_mul_trunc.sv src/FloatP16x4.v src/vector_unit.sv",
+  "VERILOG_FILES": [
+    "dir::src/ha.sv",
+    "dir::src/fa.sv",
+    "dir::src/dadda_reduced.sv",
+    "dir::src/dadda_mul_trunc.sv",
+    "dir::src/FloatP16x4.v",
+    "dir::src/vector_unit.sv"
+  ],
   "CLOCK_PORT": "clk",
   "CLOCK_PERIOD": 20.0,
   "FP_CORE_UTIL": 50,
-  "PL_TARGET_DENSITY": "expr::($FP_CORE_UTIL + 5) / 100.0",
+  "PL_TARGET_DENSITY_PCT": "expr::$FP_CORE_UTIL + 5",
   "RT_MAX_LAYER": "met3",
   "STA_CORNERS": [
     "nom_tt_025C_1v80",
     "min_ss_100C_1v60",
     "max_ff_n40C_1v95"
   ],
-  "QUIT_ON_TIMING_VIOLATIONS": false,
   "pdk::sky130A": {
     "MAX_FANOUT_CONSTRAINT": 8,
     "scl::sky130_fd_sc_hd": {

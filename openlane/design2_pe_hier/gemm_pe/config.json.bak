@@ -11,7 +11,7 @@
   "CLOCK_PORT": "clk",
   "CLOCK_PERIOD": 20.0,
   "FP_CORE_UTIL": 50,
-  "PL_TARGET_DENSITY_PCT": "expr::$FP_CORE_UTIL + 5",
+  "PL_TARGET_DENSITY_PCT": "expr::$FP_CORE_UTIL + 10",
   "RT_MAX_LAYER": "met3",
   "STA_CORNERS": [
     "nom_tt_025C_1v80",

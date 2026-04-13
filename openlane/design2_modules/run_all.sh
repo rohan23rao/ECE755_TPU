@@ -22,6 +22,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 SRC_DIR="$REPO_ROOT/Design2/src"
 
+PDK_ROOT="${PDK_ROOT:-$HOME/.volare}"
+PDK="sky130A"
+OL_IMAGE="${OL_IMAGE:-ghcr.io/efabless/openlane2:2.3.10}"
 RUN_TAG="${RUN_TAG:-$(date +%Y%m%d_%H%M%S)}"
 JOBS="${JOBS:-3}"
 
@@ -62,9 +65,16 @@ run_module() {
     local LOGFILE="$SCRIPT_DIR/logs/${MODULE}_${RUN_TAG}.log"
     echo "[START] $MODULE → $LOGFILE"
 
-    python3 -m openlane --dockerized \
-        --run-tag "$RUN_TAG" \
-        "$MODULE_DIR/config.json" \
+    docker run --rm \
+        -v "$PDK_ROOT:$PDK_ROOT" \
+        -v "$REPO_ROOT:$REPO_ROOT" \
+        -w "$MODULE_DIR" \
+        "$OL_IMAGE" \
+        python3 -m openlane \
+            --pdk-root "$PDK_ROOT" \
+            --pdk "$PDK" \
+            --run-tag "$RUN_TAG" \
+            config.json \
         2>&1 | tee "$LOGFILE"
 
     local RC=${PIPESTATUS[0]}
