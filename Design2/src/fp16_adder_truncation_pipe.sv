@@ -3,9 +3,7 @@ module fp16_adder_truncation_pipe (
     input  wire        clk,
     input  wire [15:0] op_a,
     input  wire [15:0] op_b,
-    output reg  [15:0] result,
-    output reg         valid_out,
-    input  wire        valid_in
+    output reg  [15:0] result
 );
 
     // Unpack op_a
@@ -126,7 +124,6 @@ module fp16_adder_truncation_pipe (
     reg        s1_a_is_zero, s1_b_is_zero;
     reg        s1_sa, s1_sb;
     reg [15:0] s1_op_a, s1_op_b;
-    reg        s1_valid;
 
     always_ff @(posedge clk) begin
         s1_near_diff     <= near_diff;
@@ -147,7 +144,6 @@ module fp16_adder_truncation_pipe (
         s1_sb            <= sb;
         s1_op_a          <= op_a;
         s1_op_b          <= op_b;
-        s1_valid         <= valid_in;
     end
 
     // Stage 2: Normalize -> Truncate -> Output Mux
@@ -265,9 +261,4 @@ module fp16_adder_truncation_pipe (
                | ({16{is_underflow}}               & 16'h0000)
                | ({16{is_normal}}                  & {s1_s_lg, post_exp[4:0], post_mant});
     end
-
-    always_ff @(posedge clk) begin
-        valid_out <= s1_valid;
-    end
-
 endmodule

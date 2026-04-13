@@ -165,9 +165,9 @@ module gemm_control_unit #(
             A_MASK_r      <= ({{(ARRAY_SIZE-1){1'b0}}, 1'b1} << A_LEN) - 1'b1;
             W_MASK_r      <= ({{(ARRAY_SIZE-1){1'b0}}, 1'b1} << W_LEN) - 1'b1;
             COMPUTE_LIM_r <= (MAIN_CNT_WIDTH'(A_LEN) +
-                              MAIN_CNT_WIDTH'(W_LEN) +
-                              MAIN_CNT_WIDTH'(K_LEN)) -
-                              MAIN_CNT_WIDTH'(3);
+							  MAIN_CNT_WIDTH'(W_LEN) +
+							  (MAIN_CNT_WIDTH'(K_LEN) << 1)) -
+							  MAIN_CNT_WIDTH'(3);
         end
     end
 	
