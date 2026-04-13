@@ -17,7 +17,7 @@ assign B2 = B[1];
 
 assign O0 = A1 & B1;
 assign O1 = (A2 & B1) ^ (A1 & B2);
-assign O2 = (A2 & B2) | (A2 & B1 & A1 & B2);
+assign O2 = (A2 & B2) & ~(A1 & B1);
 assign O3 = A2 & B2 & A1 & B1;
 
 

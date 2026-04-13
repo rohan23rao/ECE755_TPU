@@ -18,10 +18,6 @@ module fp16_adder_truncation (
     // Zero, Inf, and Nan checks
     wire a_is_zero = (ea == 5'd0)  && (ma == 10'd0);
     wire b_is_zero = (eb == 5'd0)  && (mb == 10'd0);
-    wire a_is_inf  = (ea == 5'd31) && (ma == 10'd0);
-    wire b_is_inf  = (eb == 5'd31) && (mb == 10'd0);
-    wire a_is_nan  = (ea == 5'd31) && (ma != 10'd0);
-    wire b_is_nan  = (eb == 5'd31) && (mb != 10'd0);
 
     // Reconstruct full significands with leading bit
     wire [10:0] sig_a = (ea == 5'd0) ? {1'b0, ma} : {1'b1, ma};
@@ -184,42 +180,23 @@ module fp16_adder_truncation (
     assign trunc_sig = use_near ? near_sig : far_trunc_sig;
 
     // Output mux flat
-    logic       is_any_nan, is_inf_cancel, is_inf_same;
-    logic       is_only_a_inf, is_only_b_inf;
     logic       is_both_zero, is_only_a_zero, is_only_b_zero;
     logic       is_overflow, is_underflow, is_normal;
 
-    assign is_any_nan     = a_is_nan | b_is_nan;
-    assign is_inf_cancel  = a_is_inf & b_is_inf & eff_sub  & ~is_any_nan;
-    assign is_inf_same    = a_is_inf & b_is_inf & ~eff_sub & ~is_any_nan;
-    assign is_only_a_inf  = a_is_inf & ~b_is_inf           & ~is_any_nan;
-    assign is_only_b_inf  = b_is_inf & ~a_is_inf           & ~is_any_nan;
     assign is_both_zero   = a_is_zero & b_is_zero;
     assign is_only_a_zero = a_is_zero & ~b_is_zero;
     assign is_only_b_zero = b_is_zero & ~a_is_zero;
-    assign is_overflow    = ~a_is_inf & ~b_is_inf & ~a_is_nan & ~b_is_nan
-                          & ~a_is_zero & ~b_is_zero & (post_exp >= 6'd31);
-    assign is_underflow   = ~a_is_inf & ~b_is_inf & ~a_is_nan & ~b_is_nan
-                          & ~a_is_zero & ~b_is_zero
-                          & (post_exp == 6'd0) & (post_mant == 10'd0) & ~trunc_sig[10];
-
-    assign is_normal = ~is_any_nan & ~is_inf_cancel & ~is_inf_same
-                     & ~is_only_a_inf & ~is_only_b_inf
-                     & ~is_both_zero & ~is_only_a_zero & ~is_only_b_zero
-                     & ~is_overflow & ~is_underflow;
+    assign is_overflow    = ~a_is_zero & ~b_is_zero & (post_exp >= 6'd31);
+    assign is_underflow   = ~a_is_zero & ~b_is_zero & (post_exp == 6'd0) & (post_mant == 10'd0) & ~trunc_sig[10];
+    assign is_normal = ~is_both_zero & ~is_only_a_zero & ~is_only_b_zero & ~is_overflow & ~is_underflow;
 
     // Selects in parallel
     always_comb begin
-        result = ({16{is_any_nan | is_inf_cancel}} & 16'h7FFF)
-               | ({16{is_inf_same}}                & {sa, 5'b11111, 10'd0})
-               | ({16{is_only_a_inf}}              & op_a)
-               | ({16{is_only_b_inf}}              & op_b)
-               | ({16{is_both_zero}}               & {sa & sb, 15'd0})
+        result = ({16{is_both_zero}}               & {sa & sb, 15'd0})
                | ({16{is_only_a_zero}}             & op_b)
                | ({16{is_only_b_zero}}             & op_a)
                | ({16{is_overflow}}                & {s_lg, 5'b11111, 10'd0})
                | ({16{is_underflow}}               & 16'h0000)
                | ({16{is_normal}}                  & {s_lg, post_exp[4:0], post_mant});
     end
-
 endmodule
