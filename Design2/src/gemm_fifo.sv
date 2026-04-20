@@ -19,6 +19,8 @@ module gemm_fifo #(
     // Global
     input  logic                    clk,
     input  logic                    rst_n,
+	input  logic                   	rd_ptr_rst,   // synchronous reset of read pointer
+	
 
     // Write Port
     input  logic [ACT_WIDTH-1:0]    data_in,    // input data (ACT or WGT width)
@@ -46,6 +48,9 @@ module gemm_fifo #(
 
     always_ff @(posedge clk, negedge rst_n) begin
         if (!rst_n) begin 
+			read_ptr <= '0;
+		end
+		else if (rd_ptr_rst) begin
 			read_ptr <= '0;
 		end
         else if (read_en) begin

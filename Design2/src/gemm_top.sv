@@ -62,7 +62,7 @@ module gemm_top #(
 
     // Output handshake
     input  logic                        Y_RDY,
-    output logic                        Y_VLD,
+    output logic [ARRAY_SIZE-1:0]       Y_VLD,
 
     // Tile completion
     output logic                        TILE_DONE,
@@ -96,6 +96,7 @@ module gemm_top #(
     logic [FIFO_ADDR_WIDTH-1:0]     wr_addr;
     logic [ARRAY_SIZE-1:0]          a_out_en;
     logic [ARRAY_SIZE-1:0]          w_out_en;
+	logic 							FIFO_RD_RST;
 
     // Systolic array control
     logic [ARRAY_SIZE-1:0]          h_pe_en;
@@ -119,6 +120,13 @@ module gemm_top #(
 
     // Systolic Array → Vector Unit
     logic [ARRAY_SIZE-1:0][ACC_WIDTH-1:0]  col_out;
+
+    // Pipeline stage: col_out domain → vector unit domain (1-cycle delay)
+    // Breaks: col_addr FF → systolic MUX → [pipe FF] → FP16 multiply → reg_out FF
+    logic [ARRAY_SIZE-1:0][ACC_WIDTH-1:0]  col_out_pipe;
+    logic [ARRAY_SIZE-1:0]                 quant_en_pipe;
+    logic                                  relu_en_pipe;
+    logic [ACC_WIDTH-1:0]                  scale_pipe;
 
     ///////////////////////////////////////////////////////////////////////////
     // Control Unit
@@ -155,6 +163,7 @@ module gemm_top #(
         .WR_ADDR        (wr_addr),
         .A_OUT_EN       (a_out_en),
         .W_OUT_EN       (w_out_en),
+		.FIFO_RD_RST 	(FIFO_RD_RST),
 
         // Systolic array control
         .H_PE_EN        (h_pe_en),
@@ -176,6 +185,7 @@ module gemm_top #(
     gemm_fifo_array u_act_fifo (
         .clk        (clk),
         .rst_n      (rst_n),
+		.rd_ptr_rst (FIFO_RD_RST),
         .data_in    (A_DATA),
         .write_en   (a_in_en),
         .write_ptr  (wr_addr),
@@ -193,6 +203,7 @@ module gemm_top #(
     gemm_fifo_array u_wgt_fifo (
         .clk        (clk),
         .rst_n      (rst_n),
+		.rd_ptr_rst (FIFO_RD_RST),
         .data_in    (W_DATA),
         .write_en   (w_in_en),
         .write_ptr  (wr_addr),
@@ -219,6 +230,19 @@ module gemm_top #(
     );
 
     ///////////////////////////////////////////////////////////////////////////
+    // Pipeline registers: systolic array output → vector unit input
+    // Registered on every clock (quant_en_pipe gates internally in vector_unit).
+    // Scale and relu_en travel with the data so the vector unit sees a
+    // consistent snapshot one cycle after col_addr selects the column.
+    ///////////////////////////////////////////////////////////////////////////
+    always_ff @(posedge clk) begin
+		col_out_pipe   <= col_out;
+		quant_en_pipe  <= quant_en;
+		relu_en_pipe   <= relu_en_out;
+		scale_pipe     <= SCALE;
+    end
+
+    ///////////////////////////////////////////////////////////////////////////
     // Vector Unit (1x8) — stub interface for teammate integration
     // Receives one column of FP16 MAC results from systolic array
     // Applies scale quantization and optional ReLU
@@ -239,10 +263,10 @@ module gemm_top #(
     ///////////////////////////////////////////////////////////////////////////
     vector_unit u_vector_unit (
         .clk        (clk),
-        .col_out    (col_out),
-        .scale      (SCALE),
-        .quant_en   (quant_en),
-        .relu_en    (relu_en_out),
+        .col_out    (col_out_pipe),
+        .scale      (scale_pipe),
+        .quant_en   (quant_en_pipe),
+        .relu_en    (relu_en_pipe),
         .y_out      (Y_OUT)
     );
 endmodule

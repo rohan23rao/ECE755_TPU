@@ -24,6 +24,7 @@ module gemm_fifo_array #(
     // Global
     input  logic                        clk,
     input  logic                        rst_n,
+	input  logic                   		rd_ptr_rst,   // synchronous reset of read pointer
 
     // Write Port
     input  logic [ARRAY_SIZE-1:0][ACT_WIDTH-1:0]  data_in,
@@ -45,6 +46,7 @@ module gemm_fifo_array #(
             gemm_fifo fifo_inst (
                 .clk      (clk),
                 .rst_n    (rst_n),
+				.rd_ptr_rst(rd_ptr_rst),
                 .data_in  (data_in[i]),
                 .write_en (write_en[i]),
 				.write_ptr(write_ptr),

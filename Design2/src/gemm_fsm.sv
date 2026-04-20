@@ -74,6 +74,10 @@ module gemm_fsm (
 	
 	// Y_VLD Flop
 	logic y_vld_next;
+	logic y_vld_pre;
+	
+	// Sticky flags: set when respective last handshake is seen, cleared on LOAD_FIFO entry
+	logic data_done_r, bias_done_r;
 	
 	
 
@@ -99,10 +103,31 @@ module gemm_fsm (
 	
 	always @(posedge clk, negedge rst_n) begin
 		if (!rst_n) begin
-			Y_VLD <= '0;
+			y_vld_pre <= '0;
+			Y_VLD     <= '0;
 		end
 		else begin
-			Y_VLD <= y_vld_next;
+			y_vld_pre <= y_vld_next;  // stage 1: 1 cycle after handshake
+			Y_VLD     <= y_vld_pre;   // stage 2: 2 cycles after handshake → aligns with Y_OUT
+		end
+	end
+	
+	always_ff @(posedge clk, negedge rst_n) begin
+		if (!rst_n) begin
+			data_done_r <= 1'b0;
+			bias_done_r <= 1'b0;
+		end 
+		else if (capture_metadata) begin   // entering LOAD_FIFO — reset for new tile
+			data_done_r <= 1'b0;
+			bias_done_r <= 1'b0;
+		end 
+		else if (state == LOAD_FIFO) begin
+			if (DATA_VLD && ~data_done_r && data_load_done) begin
+				data_done_r <= 1'b1;
+			end
+			if (BIAS_NEW_r && BIAS_VLD && ~bias_done_r && bias_load_done) begin
+				bias_done_r <= 1'b1;
+			end
 		end
 	end
 	
@@ -130,8 +155,8 @@ module gemm_fsm (
         QUANT_EN         = '0;
         RELU_EN_out      = '0;
         y_vld_next       = '0;
-        TILE_DONE        = '0;
         METADATA_RDY     = '0;
+        TILE_DONE        = '0;
         next_state       = state;
 		
 		// State Logic
@@ -148,25 +173,28 @@ module gemm_fsm (
 			
 			
 			LOAD_FIFO: begin
-				// Data Path Control
-				DATA_RDY = ~data_load_done;
+				// DATA path — deassert RDY once last transaction seen
+				DATA_RDY = ~data_done_r;
 				if (DATA_VLD && DATA_RDY) begin
-                    FIFO_IN_EN  = 1;
-                    inc_main_cnt = 1;
-                end
-				
-				// Bias Path Control
-				BIAS_RDY = BIAS_NEW_r && ~bias_load_done;
+					FIFO_IN_EN   = 1;
+					inc_main_cnt = ~data_load_done;  // suppress increment on last address
+				end
+
+				// BIAS path
+				BIAS_RDY = BIAS_NEW_r && ~bias_done_r;
 				if (BIAS_VLD && BIAS_RDY) begin
-                    LD_BIAS_en  = 1;
-                    inc_bias_cnt = 1;
-                end
-			
-				// Complete max(k,w) cycles
-				if (data_load_done && (~BIAS_NEW_r | bias_load_done)) begin
-                    next_state = GEMM_COMPUTE;
+					LD_BIAS_en   = 1;
+					inc_bias_cnt = ~bias_load_done;  // suppress increment on last address
+				end
+
+				// Mealy transition: fire on the cycle both channels complete
+				// data_complete: already sticky OR finishing this cycle
+				// bias_complete: not required, already sticky, OR finishing this cycle
+				if ((data_done_r || (DATA_VLD && DATA_RDY && data_load_done)) &&
+					(~BIAS_NEW_r || bias_done_r || (BIAS_VLD && BIAS_RDY && bias_load_done))) begin
+					next_state   = GEMM_COMPUTE;
 					clr_main_cnt = 1;
-                    clr_bias_cnt = 1;
+					clr_bias_cnt = 1;
 				end
 			end
 			
@@ -211,7 +239,7 @@ module gemm_fsm (
 					end
 				end
 				else begin
-					y_vld_next = Y_VLD;  // stall — hold Y_VLD, gate everything else
+					y_vld_next = y_vld_pre;  // stall — hold Y_VLD, gate everything else
 				end
 			end
 			

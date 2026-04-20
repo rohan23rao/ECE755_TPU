@@ -51,7 +51,7 @@ module gemm_control_unit #(
     output logic                    DATA_RDY,
     output logic                    BIAS_RDY,
     output logic                    SCALE_RDY,      // from FSM — asserted in GEMM_FLUSH
-    output logic                    Y_VLD,
+    output logic [ARRAY_SIZE-1:0]   Y_VLD,
     output logic                    TILE_DONE,
 
     // FIFO Control Outputs
@@ -60,6 +60,7 @@ module gemm_control_unit #(
     output logic [FIFO_ADDR_WIDTH-1:0] WR_ADDR,     // FIFO write address = main_cnt
     output logic [ARRAY_SIZE-1:0]   A_OUT_EN,       // pe_wave & A_MASK — read enable
     output logic [ARRAY_SIZE-1:0]   W_OUT_EN,       // pe_wave & W_MASK — read enable
+	output logic  FIFO_RD_RST,   
 
     // Systolic Array Control Outputs
     output logic [ARRAY_SIZE-1:0]   H_PE_EN,        // horizontal PE enables
@@ -83,6 +84,7 @@ module gemm_control_unit #(
     logic        clr_main_cnt,   inc_main_cnt;
     logic        clr_bias_cnt,   inc_bias_cnt;
     logic        clr_pe_wave,    shift_pe_wave;
+	logic        Y_VLD_fsm;
 
     // FSM 1-bit enable outputs → expanded to 8-bit vectors in CU
     logic        fsm_FIFO_IN_EN,    fsm_FIFO_OUT_EN;
@@ -138,7 +140,7 @@ module gemm_control_unit #(
         .DATA_RDY         (DATA_RDY),
         .BIAS_RDY         (BIAS_RDY),
         .SCALE_RDY        (SCALE_RDY),
-        .Y_VLD            (Y_VLD),
+        .Y_VLD            (Y_VLD_fsm),
         .TILE_DONE        (TILE_DONE),
         .METADATA_RDY     (METADATA_RDY)
     );
@@ -164,10 +166,10 @@ module gemm_control_unit #(
             K_DIM_r       <= K_LEN;
             A_MASK_r      <= ({{(ARRAY_SIZE-1){1'b0}}, 1'b1} << A_LEN) - 1'b1;
             W_MASK_r      <= ({{(ARRAY_SIZE-1){1'b0}}, 1'b1} << W_LEN) - 1'b1;
-            COMPUTE_LIM_r <= (MAIN_CNT_WIDTH'(A_LEN) +
-							  MAIN_CNT_WIDTH'(W_LEN) +
-							  (MAIN_CNT_WIDTH'(K_LEN) << 1)) -
-							  MAIN_CNT_WIDTH'(3);
+            COMPUTE_LIM_r <= MAIN_CNT_WIDTH'(A_LEN) +
+                 MAIN_CNT_WIDTH'(W_LEN) +
+                 MAIN_CNT_WIDTH'(K_LEN) -
+                 MAIN_CNT_WIDTH'(2);
         end
     end
 	
@@ -208,12 +210,10 @@ module gemm_control_unit #(
 	///////////////////////////////////////////////////////////////////////////
     // Done Signal Generation
     //
-    // data_load_done: main_cnt == K_DIM_r
-    //   fires one cycle AFTER last DATA handshake (cnt overshoots by 1)
+    // data_load_done: main_cnt == K_DIM_r - 1  (fires ON last DATA handshake)
     //   DATA_RDY = ~data_load_done naturally prevents further handshakes
     //
-    // bias_load_done: bias_cnt == W_DIM_r
-    //   same one-cycle-over convention for LOAD_FIFO
+    // bias_load_done: bias_cnt == W_DIM_r - 1  (fires ON last BIAS handshake)
     //
     // compute_done: main_cnt == COMPUTE_LIM_r
     //   fires ON last active compute cycle — no wasted cycle
@@ -223,11 +223,11 @@ module gemm_control_unit #(
     //   fires ON last Y_RDY handshake cycle
     //   FSM transitions on same clock edge as last column output
     ///////////////////////////////////////////////////////////////////////////
-    assign data_load_done = (main_cnt == MAIN_CNT_WIDTH'(K_DIM_r));
-    assign bias_load_done = (bias_cnt == W_DIM_r);
+    assign data_load_done = (main_cnt == MAIN_CNT_WIDTH'(K_DIM_r) - 1);
+    assign bias_load_done = (bias_cnt == BIAS_CNT_WIDTH'(W_DIM_r) - 1);
     assign compute_done   = (main_cnt == COMPUTE_LIM_r);
-    assign flush_done     = (main_cnt == (MAIN_CNT_WIDTH'(W_DIM_r) - 1'b1));
-
+    assign flush_done     = (main_cnt == MAIN_CNT_WIDTH'(W_DIM_r));        // +1 vs W_DIM_r-1: drains col_out_pipe
+	assign FIFO_RD_RST = compute_done; // Reset read pointers on compute done for next tile
 
 
 	///////////////////////////////////////////////////////////////////////////
@@ -288,6 +288,9 @@ module gemm_control_unit #(
     // Quantization — all active output rows simultaneously
     assign QUANT_EN    = {ARRAY_SIZE{fsm_QUANT_EN}} & A_MASK_r;
     assign RELU_EN_out = fsm_RELU_EN_out;
+	
+	// Output Valid vector from A_MASK_r
+	assign Y_VLD = {ARRAY_SIZE{Y_VLD_fsm}} & A_MASK_r;
 
 
 
