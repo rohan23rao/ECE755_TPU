@@ -226,7 +226,7 @@ module gemm_control_unit #(
     assign data_load_done = (main_cnt == MAIN_CNT_WIDTH'(K_DIM_r) - 1);
     assign bias_load_done = (bias_cnt == BIAS_CNT_WIDTH'(W_DIM_r) - 1);
     assign compute_done   = (main_cnt == COMPUTE_LIM_r);
-    assign flush_done     = (main_cnt == MAIN_CNT_WIDTH'(W_DIM_r));        // +1 vs W_DIM_r-1: drains col_out_pipe
+    assign flush_done     = (main_cnt == MAIN_CNT_WIDTH'(W_DIM_r) - 1);        // +1 vs W_DIM_r-1: drains col_out_pipe
 	assign FIFO_RD_RST = compute_done; // Reset read pointers on compute done for next tile
 
 

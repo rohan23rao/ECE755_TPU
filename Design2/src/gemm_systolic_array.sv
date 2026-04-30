@@ -17,8 +17,8 @@
 //                in column j simultaneously (broadcast down each column)
 //
 //              Output:
-//                COL_ADDR selects which column's ACC_OUT bus is presented
-//                on COL_OUT[ACC_WIDTH-1:0][ARRAY_SIZE-1:0]
+//                SA_OUT[col][row] exposes all ACC_WIDTH accumulator outputs
+//                directly. Column mux (COL_ADDR) moved to gemm_top.
 //
 // Connections:
 //   I_COL[i]   → PE[i][0].a_in   (activation row i enters left edge)
@@ -29,7 +29,7 @@
 //   PE[i][j].h_en_out→ PE[i][j+1].h_en_in
 //   PE[i][j].w_out   → PE[i+1][j].w_in
 //   PE[i][j].v_en_out→ PE[i+1][j].v_en_in
-//   PE[i][j].acc_out → COL_OUT mux input [j][i]
+//   PE[i][j].acc_out → sa_out[j][i]
 //
 // Author: Group5
 ///////////////////////////////////////////////////////////////////////////////
@@ -38,9 +38,7 @@ module gemm_systolic_array #(
     parameter ARRAY_SIZE      = 8,
     parameter ACT_WIDTH       = 4,
     parameter WGT_WIDTH       = 4,
-    parameter ACC_WIDTH       = 16,
-    parameter FIFO_DEPTH      = 8,
-    parameter FIFO_ADDR_WIDTH = $clog2(FIFO_DEPTH)
+    parameter ACC_WIDTH       = 16
 ) (
     // Global
     input  logic                                        clk,
@@ -59,19 +57,14 @@ module gemm_systolic_array #(
     input  logic [ACC_WIDTH-1:0]    bias,       // broadcast to all PEs
     input  logic [ARRAY_SIZE-1:0]   ld_bias,    // one-hot per column
 
-    // Column select & output
-    input  logic [FIFO_ADDR_WIDTH-1:0]              col_addr,   // selects output col
-    output logic [ARRAY_SIZE-1:0][ACC_WIDTH-1:0]    col_out     // selected col ACC_OUT
+    // Full accumulator output mesh: sa_out[col][row]
+    // col=0 is leftmost (x~105um), col=7 is rightmost (x~1135um)
+    output logic [ARRAY_SIZE-1:0][ARRAY_SIZE-1:0][ACC_WIDTH-1:0] sa_out
 );
 
 
     ///////////////////////////////////////////////////////////////////////////
     // Internal mesh wires
-    // a_mesh[i][j]     : activation flowing into PE[i][j] from west
-    // w_mesh[i][j]     : weight flowing into PE[i][j] from north
-    // h_en_mesh[i][j]  : horizontal enable into PE[i][j]
-    // v_en_mesh[i][j]  : vertical enable into PE[i][j]
-    // acc_mesh[i][j]   : accumulator output of PE[i][j]
     ///////////////////////////////////////////////////////////////////////////
     logic [ARRAY_SIZE-1:0][ARRAY_SIZE:0][ACT_WIDTH-1:0]   a_mesh;
     logic [ARRAY_SIZE:0][ARRAY_SIZE-1:0][WGT_WIDTH-1:0]   w_mesh;
@@ -80,47 +73,31 @@ module gemm_systolic_array #(
     logic [ARRAY_SIZE-1:0][ARRAY_SIZE-1:0][ACC_WIDTH-1:0]  acc_mesh;
 
     ///////////////////////////////////////////////////////////////////////////
-    // Boundary connections — left column and top row inputs
+    // Boundary connections
     ///////////////////////////////////////////////////////////////////////////
     genvar i, j;
     generate
         for (i = 0; i < ARRAY_SIZE; i++) begin : boundary_h
-            // Activation row i enters left edge of PE[i][0]
             assign a_mesh[i][0]    = i_col[i];
-            // Horizontal enable for row i enters left edge
             assign h_en_mesh[i][0] = h_pe_en[i];
         end
 
         for (j = 0; j < ARRAY_SIZE; j++) begin : boundary_v
-            // Weight col j enters top edge of PE[0][j]
             assign w_mesh[0][j]    = w_row[j];
-            // Vertical enable for col j enters top edge
             assign v_en_mesh[0][j] = v_pe_en[j];
         end
     endgenerate
-	
-	// Demux of Bias to avoid broadcast-like Fanout of Bias to ALL PEs
-	logic [ARRAY_SIZE-1:0][ACC_WIDTH-1:0] bias_col;
-	generate
-		for (j = 0; j < ARRAY_SIZE; j++) begin : bias_demux
-			assign bias_col[j] = ld_bias[j] ? bias : '0;
-		end
-	endgenerate
+
+    // Bias demux: avoid broadcast fanout across all PEs
+    logic [ARRAY_SIZE-1:0][ACC_WIDTH-1:0] bias_col;
+    generate
+        for (j = 0; j < ARRAY_SIZE; j++) begin : bias_demux
+            assign bias_col[j] = ld_bias[j] ? bias : '0;
+        end
+    endgenerate
 
     ///////////////////////////////////////////////////////////////////////////
     // PE grid instantiation
-    // PE[i][j] : row i (0=top), col j (0=left)
-    //   a_in    ← a_mesh[i][j]       (from west or left boundary)
-    //   a_out   → a_mesh[i][j+1]     (to east)
-    //   h_en_in ← h_en_mesh[i][j]
-    //   h_en_out→ h_en_mesh[i][j+1]
-    //   w_in    ← w_mesh[i][j]       (from north or top boundary)
-    //   w_out   → w_mesh[i+1][j]     (to south)
-    //   v_en_in ← v_en_mesh[i][j]
-    //   v_en_out→ v_en_mesh[i+1][j]
-    //   bias    ← bias (broadcast)
-    //   ld_bias ← ld_bias[j] (column j loads bias into all its rows)
-    //   acc_out → acc_mesh[i][j]
     ///////////////////////////////////////////////////////////////////////////
     generate
         for (i = 0; i < ARRAY_SIZE; i++) begin : row_gen
@@ -128,23 +105,19 @@ module gemm_systolic_array #(
                 gemm_pe pe_inst (
                     .clk      (clk),
 
-                    // Horizontal
                     .a_in     (a_mesh[i][j]),
                     .h_en_in  (h_en_mesh[i][j]),
                     .a_out    (a_mesh[i][j+1]),
                     .h_en_out (h_en_mesh[i][j+1]),
 
-                    // Vertical
                     .w_in     (w_mesh[i][j]),
                     .v_en_in  (v_en_mesh[i][j]),
                     .w_out    (w_mesh[i+1][j]),
                     .v_en_out (v_en_mesh[i+1][j]),
 
-                    // Bias — broadcast value, one-hot column select
-                    .bias    (bias_col[j]),
+                    .bias     (bias_col[j]),
                     .ld_bias  (ld_bias[j]),
 
-                    // Accumulator output
                     .acc_out  (acc_mesh[i][j])
                 );
             end
@@ -152,14 +125,16 @@ module gemm_systolic_array #(
     endgenerate
 
     ///////////////////////////////////////////////////////////////////////////
-    // Column output mux
-    // COL_ADDR selects which column's accumulator bus is driven onto col_out
-    // col_out[i] = acc_mesh[i][col_addr]  for all rows i
-    // This is an 8-wide mux across ARRAY_SIZE columns of ACC_WIDTH-bit values
+    // Output: expose full accumulator mesh
+    // sa_out[j][i] = acc_mesh[i][j]  (col-major for South pin alignment)
+    // Flat bit index: sa_out[j*128 + i*16 +: 16] = col j, row i
     ///////////////////////////////////////////////////////////////////////////
     generate
-        for (i = 0; i < ARRAY_SIZE; i++) begin : col_out_gen
-            assign col_out[i] = acc_mesh[i][col_addr];
+        for (i = 0; i < ARRAY_SIZE; i++) begin : row_out_gen
+            for (j = 0; j < ARRAY_SIZE; j++) begin : col_out_gen
+                assign sa_out[j][i] = acc_mesh[i][j];
+            end
         end
     endgenerate
+
 endmodule

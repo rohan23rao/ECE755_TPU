@@ -1,0 +1,30 @@
+{
+  "DESIGN_NAME": "gemm_pe",
+  "VERILOG_FILES": [
+    "dir::../../../src_2/FixedP2x4_opt.v",
+    "dir::../../../src_2/FloatP4x16.v",
+    "dir::../../../src_2/fp16_adder_helpers.v",
+    "dir::../../../src_2/fp16_adder_truncation.sv",
+    "dir::../../../src_2/gemm_pe.sv"
+  ],
+  "CLOCK_PORT": "clk",
+  "CLOCK_PERIOD": 14,
+  "SYNTH_SHARE_RESOURCES": false,
+  "SYNTH_STRATEGY": "AREA 3",
+  "FP_SIZING":  "absolute",
+  "DIE_AREA":   "0 0 119.85 119.68",
+  "CORE_AREA":  "5.52 5.44 114.08 114.24",
+  "PL_TARGET_DENSITY_PCT": 90,
+  "FP_PIN_ORDER_CFG": "dir::pin_order.cfg",
+  "RUN_POST_GPL_DESIGN_REPAIR": false,
+  "RUN_POST_CTS_RESIZER_TIMING": false,
+  "RUN_POST_GRT_DESIGN_REPAIR": false,
+  "QUIT_ON_TIMING_VIOLATIONS": false,
+  "STA_CORNERS": ["nom_tt_025C_1v80", "min_ss_100C_1v60", "max_ff_n40C_1v95"],
+  "pdk::sky130A": {
+    "MAX_FANOUT_CONSTRAINT": 10,
+    "scl::sky130_fd_sc_hd": {
+      "CLOCK_PERIOD": 14
+    }
+  }
+}

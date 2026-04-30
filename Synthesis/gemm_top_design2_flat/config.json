@@ -1,0 +1,36 @@
+{
+  "DESIGN_NAME": "gemm_top",
+  "VERILOG_FILES": [
+    "dir::../../../src_2/FixedP2x4_opt.v",
+    "dir::../../../src_2/ha.sv",
+    "dir::../../../src_2/fa.sv",
+    "dir::../../../src_2/FloatP4x16.v",
+    "dir::../../../src_2/fp16_adder_helpers.v",
+    "dir::../../../src_2/fp16_adder_truncation.sv",
+    "dir::../../../src_2/gemm_fifo.sv",
+    "dir::../../../src_2/gemm_fifo_array.sv",
+    "dir::../../../src_2/dadda_reduced.sv",
+    "dir::../../../src_2/dadda_mul_trunc.sv",
+    "dir::../../../src_2/FloatP16x4.v",
+    "dir::../../../src_2/gemm_pe.sv",
+    "dir::../../../src_2/vector_unit.sv",
+    "dir::../../../src_2/gemm_fsm.sv",
+    "dir::../../../src_2/gemm_control_unit.sv",
+    "dir::../../../src_2/gemm_systolic_array.sv",
+    "dir::../../../src_2/gemm_top.sv"
+  ],
+  "CLOCK_PORT": "clk",
+  "CLOCK_PERIOD": 14,
+
+  "STA_CORNERS": [
+    "nom_tt_025C_1v80",
+    "min_ss_100C_1v60",
+    "max_ff_n40C_1v95"
+  ],
+  "pdk::sky130A": {
+    "MAX_FANOUT_CONSTRAINT": 10,
+    "scl::sky130_fd_sc_hd": {
+      "CLOCK_PERIOD": 14
+    }
+  }
+} 

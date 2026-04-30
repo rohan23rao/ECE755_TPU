@@ -58,8 +58,10 @@ assign is_zero = (A[INPUT_WIDTH-2:0] == 0 || B[INPUT_WIDTH-2:0] == 0); //dont ch
 
 //Stage 2 - Calculate Input effectives (bias-free, mux selects 0 for subnormals)
 wire [INPUT_EXPONENT_BITS-1:0] unbiased_exp_a, unbiased_exp_b;
-assign unbiased_exp_a = (is_norm_a) ? stored_exp_a : {INPUT_EXPONENT_BITS{1'b0}};
-assign unbiased_exp_b = (is_norm_b) ? stored_exp_b : {INPUT_EXPONENT_BITS{1'b0}};
+assign unbiased_exp_a = (is_norm_a) ? stored_exp_a : {{(INPUT_EXPONENT_BITS-1){1'b0}}, 1'b1};
+assign unbiased_exp_b = (is_norm_b) ? stored_exp_b : {{(INPUT_EXPONENT_BITS-1){1'b0}}, 1'b1};
+//assign unbiased_exp_a = (is_norm_a) ? stored_exp_a : {INPUT_EXPONENT_BITS{1'b0}};
+//assign unbiased_exp_b = (is_norm_b) ? stored_exp_b : {INPUT_EXPONENT_BITS{1'b0}};
 
 assign effective_mantissa_a = {is_norm_a, stored_mantissa_a};
 assign effective_mantissa_b = {is_norm_b, stored_mantissa_b};

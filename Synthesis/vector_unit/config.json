@@ -1,0 +1,38 @@
+{
+  "DESIGN_NAME": "vector_unit",
+  "VERILOG_FILES": [
+    "dir::../../../src_2/ha.sv",
+    "dir::../../../src_2/fa.sv",
+    "dir::../../../src_2/dadda_reduced.sv",
+    "dir::../../../src_2/dadda_mul_trunc.sv",
+    "dir::../../../src_2/FloatP16x4.v",
+    "dir::../../../src_2/vector_unit.sv"
+  ],
+  "CLOCK_PORT": "clk",
+  "CLOCK_PERIOD": 14,
+  "SYNTH_SHARE_RESOURCES": false,
+  "SYNTH_STRATEGY": "AREA 3",
+  "FP_SIZING": "absolute",
+  "DIE_AREA": "0 0 1149.08 46.24",
+  "CORE_AREA": "3.45 3.52 1145.63 42.72",
+  "PL_TARGET_DENSITY_PCT": 91,
+  "FP_PIN_ORDER_CFG": "dir::pin_order.cfg",
+  "RUN_POST_GPL_DESIGN_REPAIR": false,
+  "RUN_POST_CTS_RESIZER_TIMING": false,
+  "RUN_POST_GRT_DESIGN_REPAIR": false,
+  "QUIT_ON_TIMING_VIOLATIONS": false,
+  "DIODE_INSERTION_STRATEGY": 3,
+  "FP_IO_VLENGTH": 0.5,
+  "FP_IO_VEXTEND": 0,
+  "STA_CORNERS": [
+    "nom_tt_025C_1v80",
+    "min_ss_100C_1v60",
+    "max_ff_n40C_1v95"
+  ],
+  "pdk::sky130A": {
+    "scl::sky130_fd_sc_hd": {
+      "CLOCK_PERIOD": 14,
+      "MAX_FANOUT_CONSTRAINT": 12
+    }
+  }
+}

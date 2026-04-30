@@ -1,0 +1,35 @@
+{
+  "DESIGN_NAME": "gemm_top",
+  "VERILOG_FILES": [
+    "dir::../../../src/FixedP11x11.v",
+    "dir::../../../src/FixedP2x4.v",
+    "dir::../../../src/FloatP16x16.v",
+    "dir::../../../src/FloatP16x4.v",
+    "dir::../../../src/FloatP4x16.v",
+    "dir::../../../src/fp16_adder.sv",
+    "dir::../../../src/gemm_fifo.sv",
+    "dir::../../../src/gemm_fifo_array.sv",
+    "dir::../../../src/gemm_fsm.sv",
+    "dir::../../../src/gemm_control_unit.sv",
+    "dir::../../../src/gemm_pe.sv",
+    "dir::../../../src/gemm_systolic_array.sv",
+    "dir::../../../src/vector_unit.sv",
+    "dir::../../../src/gemm_top.sv"
+  ],
+  "CLOCK_PORT": "clk",
+  "CLOCK_PERIOD": 14,
+  "STA_CORNERS": [
+    "nom_tt_025C_1v80",
+    "min_ss_100C_1v60",
+    "max_ff_n40C_1v95"
+  ],
+  "ERROR_ON_PDN_VIOLATIONS": false,
+  "RUN_IRDROP_REPORT": false, 
+  "QUIT_ON_MAX_FANOUT_VIOLATIONS": false,
+  "pdk::sky130A": {
+    "MAX_FANOUT_CONSTRAINT": 10,
+    "scl::sky130_fd_sc_hd": {
+      "CLOCK_PERIOD": 14.0
+    }
+  }
+}

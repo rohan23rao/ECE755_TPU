@@ -10,13 +10,8 @@
 // Data flow:
 //   A_DATA[3:0][0:7] → Activation FIFOs → I_COL[0:7] → Systolic Array
 //   W_DATA[3:0][0:7] → Weight FIFOs     → W_ROW[0:7] → Systolic Array
-//   Systolic Array   → COL_OUT[15:0][0:7] → Vector Unit → Y_OUT[3:0][0:7]
-//
-// Control flow:
-//   External handshakes → Control Unit → FIFO/Array/VU enables
-//
-// Interface follows GEMM_TOP block diagram. Vector Unit interface stubbed
-// with correct port names for teammate integration.
+//   Systolic Array   → SA_OUT[col][row] → COL_ADDR mux → col_out[row]
+//                   → Vector Unit → Y_OUT[3:0][0:7]
 //
 // Author: Group5
 ///////////////////////////////////////////////////////////////////////////////
@@ -68,20 +63,12 @@ module gemm_top #(
     output logic                        TILE_DONE,
 
     // Data Inputs
-    // Activation data — one 4-bit value per FIFO row, 8 rows
     input  logic [ARRAY_SIZE-1:0][ACT_WIDTH-1:0]   A_DATA,
-
-    // Weight data — one 4-bit value per FIFO col, 8 cols
     input  logic [ARRAY_SIZE-1:0][WGT_WIDTH-1:0]   W_DATA,
-
-    // Bias — FP16 broadcast value loaded into systolic array accumulators
     input  logic [ACC_WIDTH-1:0]        BIAS,
-
-    // Scale — FP16 per-channel scale for vector unit quantization
     input  logic [ACC_WIDTH-1:0]        SCALE,
 
     // Data Output
-    // Quantized output — one OUT_WIDTH value per row, 8 rows
     output logic [ARRAY_SIZE-1:0][OUT_WIDTH-1:0]   Y_OUT
 );
 
@@ -90,21 +77,18 @@ module gemm_top #(
     // Internal wires — Control Unit outputs
     ///////////////////////////////////////////////////////////////////////////
 
-    // FIFO control
     logic [ARRAY_SIZE-1:0]          a_in_en;
     logic [ARRAY_SIZE-1:0]          w_in_en;
     logic [FIFO_ADDR_WIDTH-1:0]     wr_addr;
     logic [ARRAY_SIZE-1:0]          a_out_en;
     logic [ARRAY_SIZE-1:0]          w_out_en;
-	logic 							FIFO_RD_RST;
+    logic                           FIFO_RD_RST;
 
-    // Systolic array control
     logic [ARRAY_SIZE-1:0]          h_pe_en;
     logic [ARRAY_SIZE-1:0]          v_pe_en;
     logic [ARRAY_SIZE-1:0]          ld_bias;
     logic [FIFO_ADDR_WIDTH-1:0]     col_addr;
 
-    // Vector unit control
     logic [ARRAY_SIZE-1:0]          quant_en;
     logic                           relu_en_out;
 
@@ -112,17 +96,16 @@ module gemm_top #(
     // Internal wires — datapath
     ///////////////////////////////////////////////////////////////////////////
 
-    // Activation FIFO → Systolic Array
     logic [ARRAY_SIZE-1:0][ACT_WIDTH-1:0]  i_col;
-
-    // Weight FIFO → Systolic Array
     logic [ARRAY_SIZE-1:0][WGT_WIDTH-1:0]  w_row;
 
-    // Systolic Array → Vector Unit
+    // Full SA output mesh: sa_out_full[col][row]
+    logic [ARRAY_SIZE-1:0][ARRAY_SIZE-1:0][ACC_WIDTH-1:0] sa_out_full;
+
+    // Column-selected output (mux applied in top, same semantics as before)
     logic [ARRAY_SIZE-1:0][ACC_WIDTH-1:0]  col_out;
 
-    // Pipeline stage: col_out domain → vector unit domain (1-cycle delay)
-    // Breaks: col_addr FF → systolic MUX → [pipe FF] → FP16 multiply → reg_out FF
+    // Pipeline stage
     logic [ARRAY_SIZE-1:0][ACC_WIDTH-1:0]  col_out_pipe;
     logic [ARRAY_SIZE-1:0]                 quant_en_pipe;
     logic                                  relu_en_pipe;
@@ -135,7 +118,6 @@ module gemm_top #(
         .clk            (clk),
         .rst_n          (rst_n),
 
-        // External control inputs
         .TILE_START     (TILE_START),
         .METADATA_VLD   (METADATA_VLD),
         .A_LEN          (A_LEN),
@@ -149,7 +131,6 @@ module gemm_top #(
         .Y_RDY          (Y_RDY),
         .SCALE_VLD      (SCALE_VLD),
 
-        // External control outputs
         .METADATA_RDY   (METADATA_RDY),
         .DATA_RDY       (DATA_RDY),
         .BIAS_RDY       (BIAS_RDY),
@@ -157,35 +138,29 @@ module gemm_top #(
         .Y_VLD          (Y_VLD),
         .TILE_DONE      (TILE_DONE),
 
-        // FIFO control
         .A_IN_EN        (a_in_en),
         .W_IN_EN        (w_in_en),
         .WR_ADDR        (wr_addr),
         .A_OUT_EN       (a_out_en),
         .W_OUT_EN       (w_out_en),
-		.FIFO_RD_RST 	(FIFO_RD_RST),
+        .FIFO_RD_RST    (FIFO_RD_RST),
 
-        // Systolic array control
         .H_PE_EN        (h_pe_en),
         .V_PE_EN        (v_pe_en),
         .LD_BIAS        (ld_bias),
         .COL_ADDR       (col_addr),
 
-        // Vector unit control
         .QUANT_EN       (quant_en),
         .RELU_EN_out    (relu_en_out)
     );
 
     ///////////////////////////////////////////////////////////////////////////
     // Activation FIFO Array
-    // 8x FIFOs, one per systolic array row
-    // Write: A_DATA[i] written when A_IN_EN[i] asserted, at slot WR_ADDR
-    // Read:  data_out[i] driven to systolic array row i when A_OUT_EN[i]
     ///////////////////////////////////////////////////////////////////////////
     gemm_fifo_array u_act_fifo (
         .clk        (clk),
         .rst_n      (rst_n),
-		.rd_ptr_rst (FIFO_RD_RST),
+        .rd_ptr_rst (FIFO_RD_RST),
         .data_in    (A_DATA),
         .write_en   (a_in_en),
         .write_ptr  (wr_addr),
@@ -195,15 +170,11 @@ module gemm_top #(
 
     ///////////////////////////////////////////////////////////////////////////
     // Weight FIFO Array
-    // 8x FIFOs, one per systolic array column
-    // Write: W_DATA[j] written when W_IN_EN[j] asserted, at slot WR_ADDR
-    // Read:  data_out[j] driven to systolic array col j when W_OUT_EN[j]
-    // Note:  WGT_WIDTH == ACT_WIDTH from gemm_pkg so same array type used
     ///////////////////////////////////////////////////////////////////////////
     gemm_fifo_array u_wgt_fifo (
         .clk        (clk),
         .rst_n      (rst_n),
-		.rd_ptr_rst (FIFO_RD_RST),
+        .rd_ptr_rst (FIFO_RD_RST),
         .data_in    (W_DATA),
         .write_en   (w_in_en),
         .write_ptr  (wr_addr),
@@ -213,9 +184,7 @@ module gemm_top #(
 
     ///////////////////////////////////////////////////////////////////////////
     // Systolic Array (8x8)
-    // Receives I_COL from activation FIFOs, W_ROW from weight FIFOs
-    // PE enables ripple diagonally creating correct MAC timing
-    // COL_ADDR selects which column's accumulator output is presented
+    // col_addr mux applied here; SA exposes full acc mesh via sa_out
     ///////////////////////////////////////////////////////////////////////////
     gemm_systolic_array u_systolic_array (
         .clk        (clk),
@@ -225,41 +194,32 @@ module gemm_top #(
         .v_pe_en    (v_pe_en),
         .bias       (BIAS),
         .ld_bias    (ld_bias),
-        .col_addr   (col_addr),
-        .col_out    (col_out)
+        .sa_out     (sa_out_full)
     );
 
     ///////////////////////////////////////////////////////////////////////////
-    // Pipeline registers: systolic array output → vector unit input
-    // Registered on every clock (quant_en_pipe gates internally in vector_unit).
-    // Scale and relu_en travel with the data so the vector unit sees a
-    // consistent snapshot one cycle after col_addr selects the column.
+    // Column output mux (moved from SA)
+    // col_out[i] = sa_out_full[col_addr][i]  for all rows i
+    ///////////////////////////////////////////////////////////////////////////
+    genvar i;
+    generate
+        for (i = 0; i < ARRAY_SIZE; i++) begin : col_mux
+            assign col_out[i] = sa_out_full[col_addr][i];
+        end
+    endgenerate
+
+    ///////////////////////////////////////////////////////////////////////////
+    // Pipeline registers
     ///////////////////////////////////////////////////////////////////////////
     always_ff @(posedge clk) begin
-		col_out_pipe   <= col_out;
-		quant_en_pipe  <= quant_en;
-		relu_en_pipe   <= relu_en_out;
-		scale_pipe     <= SCALE;
+        col_out_pipe   <= col_out;
+        quant_en_pipe  <= quant_en;
+        relu_en_pipe   <= relu_en_out;
+        scale_pipe     <= SCALE;
     end
 
     ///////////////////////////////////////////////////////////////////////////
-    // Vector Unit (1x8) — stub interface for teammate integration
-    // Receives one column of FP16 MAC results from systolic array
-    // Applies scale quantization and optional ReLU
-    // Outputs OUT_WIDTH quantized values, one per active row
-    //
-    // TODO: replace with teammate's gemm_vector_unit instantiation
-    //       Expected port interface based on GEMM_TOP diagram:
-    //         .clk        (clk)
-    //         .rst_n      (rst_n)
-    //         .col_out    (col_out)     // [ACC_WIDTH-1:0][0:ARRAY_SIZE-1]
-    //         .scale      (SCALE)       // [ACC_WIDTH-1:0]
-    //         .quant_en   (quant_en)    // [ARRAY_SIZE-1:0] — FSM gates this
-    //         .relu_en    (relu_en_out) // 1-bit
-    //         .y_out      (Y_OUT)       // [OUT_WIDTH-1:0][0:ARRAY_SIZE-1]
-    //
-    // Handshake signals (SCALE_VLD, SCALE_RDY, Y_RDY, Y_VLD) are handled
-    // entirely by the FSM — the vector unit receives only data and enables.
+    // Vector Unit
     ///////////////////////////////////////////////////////////////////////////
     vector_unit u_vector_unit (
         .clk        (clk),
@@ -269,4 +229,5 @@ module gemm_top #(
         .relu_en    (relu_en_pipe),
         .y_out      (Y_OUT)
     );
+
 endmodule
