@@ -30,7 +30,9 @@ Reported clock is 14 ns target. Design 1 / Design 2 Flat fail timing at min_ss a
 
 The throughput win is mostly from the hardened PE as the global router stops dictating the critical path and timing becomes predictable. The power win comes similarly, fixed macro placement narrows the parasitic spread across PVT corners.
 
-![STA across corners](DesignDiagrams/fp16_adder_comparasin.png) ![PE optimization](DesignDiagrams/PE_util_optimization.png)
+### Layout Optimizations — PE Routing Density Sweep
+
+![PE optimization](DesignDiagrams/PE_util_optimization.png)
 
 ---
 
@@ -38,13 +40,16 @@ The throughput win is mostly from the hardened PE as the global router stops dic
 
 ### System-level
 
-![System level](DesignDiagrams/Final_Design_Diagrams-SYSTEM_LEVEL.drawio.png)
+<table>
+<tr>
+<td width="28%" align="center"><img src="DesignDiagrams/Final_Design_Diagrams-SYSTEM_LEVEL.drawio.png" width="240"></td>
+<td width="72%" align="center"><img src="DesignDiagrams/Final_Design_Diagrams-GEMM_TOP.drawio.png" width="680"></td>
+</tr>
+</table>
 
 The GEMM core works by a host CPU staging activation and weight tiles into the on-chip FIFOs via ready/valid handshakes, signals `TILE_START`, the systolic array streams the result, and the vector unit applies an FP16 scale before producing FP4 outputs. Tiling and dataflow scheduling for matrices larger than 8×8 are done through the host CPU. 
 
 ### GEMM top
-
-![GEMM top](DesignDiagrams/Final_Design_Diagrams-GEMM_TOP.drawio.png)
 
 Inside `gemm_top.sv`:
 - **`gemm_control_unit`** — handshake FSM that drives per-row and per-column enables, bias loading, and the read out column mux.
