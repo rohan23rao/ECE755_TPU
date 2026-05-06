@@ -1,118 +1,124 @@
-# ECE755_TPU
-ECE755 Project TPU — 8x8 Systolic Array GEMM Accelerator
+# ECE 755 — Area-Efficient GEMM Core for Edge Inference
 
-## Repository Structure
+An 8×8 systolic GEMM accelerator taped out in **Skywater 130 nm**. FP4 weights and activations, FP16 accumulators, FP16×FP16 → FP4 vector quantization on output. The full chip closes timing at 14 ns (≈137 MHz at typical PVT), delivering **3.59 GFLOPS/s** at **0.40× the power** of a naive flattened baseline. This is a 2.25× throughput improvement at lower power, achieved by hardening the PE and vector-unit as floorplanned macros and adopting a pruned Dadda multiplier in the scale path.
+
+> ECE 755, University of Wisconsin–Madison · **Team:** Ashwin K. Avula · Shao-Kai Chang · Samuel Cooper · Advait Paithankar · Rohan Rao
+
+---
+
+## Final Layout
+
+| Hierarchical (final) | Side-by-side comparison |
+| :---: | :---: |
+| ![Final GDS](DesignDiagrams/TOP.png) | ![Layout comparison](DesignDiagrams/gemm_top_comparison.png) |
+
+The hardened version places 64 GEMM PE macros in an 8×8 grid above a single 8-lane vector-unit macro. 
+
+## Final PPA — three flows compared
+
+| Metric | Design 1 Flat (baseline) | Design 2 Flat | **Design 2 Hierarchical (signoff)** |
+|---|---:|---:|---:|
+| f_max (typical corner) | 59.1 MHz | ~86 MHz | **136.7 MHz** |
+| Throughput | 1.59 GFLOPS/s | 2.32 GFLOPS/s | **3.59 GFLOPS/s** |
+| Power (normalized) | 1.00× | 0.85× | **0.40×** |
+| Area (normalized) | 1.00× | 1.00× | 1.60× |
+| Worst setup slack @ 14 ns (min_ss) | -19.04 ns ✗ | -8.47 ns ✗ | **+0.61 ns ✓** |
+| Cells (incl. macros) | 71,167 | 69,374 | 13,004 + 65 macros |
+| Die area | 1.02 mm² | 1.01 mm² | 1.63 mm² |
+
+Reported clock is 14 ns target. Design 1 / Design 2 Flat fail timing at min_ss and nom_tt; only the hierarchical floorplan with hardened PE / vector_unit macros closes all three corners. Per-corner numbers live in [`Synthesis/<flow>/metrics.json`](Synthesis/).
+
+The throughput win is mostly from the hardened PE as the global router stops dictating the critical path and timing becomes predictable. The power win comes similarly, fixed macro placement narrows the parasitic spread across PVT corners.
+
+### Layout Optimizations — PE Routing Density Sweep
+
+![PE optimization](DesignDiagrams/PE_util_optimization.png)
+
+---
+
+## Architecture
+
+### System-level
+
+<table>
+<tr>
+<td width="28%" align="center"><img src="DesignDiagrams/Final_Design_Diagrams-SYSTEM_LEVEL.drawio.png" width="240"></td>
+<td width="72%" align="center"><img src="DesignDiagrams/Final_Design_Diagrams-GEMM_TOP.drawio.png" width="680"></td>
+</tr>
+</table>
+
+The GEMM core works by a host CPU staging activation and weight tiles into the on-chip FIFOs via ready/valid handshakes, signals `TILE_START`, the systolic array streams the result, and the vector unit applies an FP16 scale before producing FP4 outputs. Tiling and dataflow scheduling for matrices larger than 8×8 are done through the host CPU. 
+
+### GEMM top
+
+Inside `gemm_top.sv`:
+- **`gemm_control_unit`** — handshake FSM that drives per-row and per-column enables, bias loading, and the read out column mux.
+- **`gemm_fifo_array` ×2** — one for activations (per-row) and one for weights (per-column). Each is 8 instances of `gemm_fifo.sv`.
+- **`gemm_systolic_array`** — 8×8 mesh of `gemm_pe.sv` instances. Activations flow east, weights flow south, enables ripple diagonally so `PE[i][j]` activates at cycle `i+j`.
+- **`vector_unit`** — 8 lanes of `FloatP16x4`, sharing a single `SCALE` value broadcast across the row.
+
+### Processing element
+
+| Original (1-stage) | Pipelined (2-stage, used in final) |
+| :---: | :---: |
+| ![PE original](DesignDiagrams/Final_Design_Diagrams-PE.drawio.png) | ![PE pipelined](DesignDiagrams/Final_Design_Diagrams-PE_PIPELINED.drawio.png) |
+
+Each PE is a fully-pipelined MAC:
+
+1. **Stage 1** — `a_in` and `w_in` are AND-gated by `pe_en = h_en_in & v_en_in` (zeroes the multiplier when the PE is inactive, suppressing switching power), then fed to a `FloatP4x16` FP4×FP4 → FP16 multiplier. The product is registered in `mul_out_q`.
+2. **Stage 2** — `mul_out_q` adds to `acc_q` via `fp16_adder_truncation`, gated by `pe_en_q` (the 1-cycle-delayed enable that aligns with the registered product).
+
+Bias is loaded directly into the accumulator on `ld_bias` (mutually exclusive with compute). The PE has **no reset** as the FSM guarantees a `LD_BIAS` fires before any compute, which initializes the accumulator deterministically.
+
+
+### Arithmetic units
+
+The pruned Dadda multiplier saves area, power and timing greatly accepting a small bounded scale multiply error.
+
+| Original Dadda multiplier | Pruned Dadda (used in vector unit) |
+| :---: | :---: |
+| ![Original mul](DesignDiagrams/Final_Design_Diagrams-Original_Multiplier.drawio.png) | ![Pruned dadda](DesignDiagrams/Final_Design_Diagrams-Pruned_dadda_algorithm.drawio.png) |
+
+The dual-path FP16 adder (`fp16_adder_truncation.sv`) selects a near path for effective subtractions with `|exp_diff| ≤ 1` and a far path for everything else:
+
+| Original FP16 adder | Dual-path FP16 adder |
+| :---: | :---: |
+| ![Original adder](DesignDiagrams/Final_Design_Diagrams-Original_Adder.drawio.png) | ![Dual path adder](DesignDiagrams/Final_Design_Diagrams-dual_path_Adder.drawio.png) |
+
+### Control & data flow
+
+| Control unit / FSM | Systolic data flow | Systolic control |
+| :---: | :---: | :---: |
+| ![Control](DesignDiagrams/Final_Design_Diagrams-CONTROL_UNIT.drawio.png) | ![Data](DesignDiagrams/Final_Design_Diagrams-SYSTOLIC_ARRAY_DATA.drawio.png) | ![Sysarr ctrl](DesignDiagrams/Final_Design_Diagrams-SYSTOLIC_ARRAY_CONTROL.drawio.png) |
+
+| FSM (top) | FIFOs | Vector unit |
+| :---: | :---: | :---: |
+| ![FSM](DesignDiagrams/Final_Design_Diagrams-FSM_TOP.drawio.png) | ![FIFOs](DesignDiagrams/Final_Design_Diagrams-FIFOS.drawio.png) | ![Vector](DesignDiagrams/Final_Design_Diagrams-Vector_Unit.drawio.png) |
+
+---
+
+## Repository layout
 
 ```
-Design1/src/          Design Review 1 (baseline)
-Design2/src/          Design Review 2 (optimized)
-DesignDiagrams/       Architecture diagrams
-openlane/             OpenLane2 APR configs and scripts
+ECE755_TPU/
+├── Design2/src/                     RTL
+├── Design1/                         Baseline reference (single-stage PE)
+├── Synthesis/                       Hardened tapeout artifacts (read-only)
+│   ├── gemm_pe/                     PE macro: GDS, LEF, SDF, Liberty, metrics
+│   ├── vector_unit/                 8-lane vector unit macro
+│   ├── gemm_top_design1/            Design 1 flat (baseline)
+│   ├── gemm_top_design2_flat/       Design 2 flat
+│   └── gemm_top_design2_hierarch/   ★ Final hierarchical signoff
+├── openlane/                        OpenLane2 replication scripts (older flow)
+│   ├── scripts/run_flow.sh          Single-config driver
+│   ├── design2_hier/run_hier.sh     Two-step PE → top driver
+│   └── design2_*/                   Per-flow config.json + constraints
+├── DesignDiagrams/                  Architecture PNGs (referenced above)
+├── Verification/                    Top-level testbenches (including MNIST)
+└── Gemm_Top_Results.xlsx            PPA spreadsheet across runs
 ```
 
-## OpenLane2 Setup
+`Synthesis/` holds the final correct outputs and configs from the signoff flow (14 ns clock, hardened macros). `openlane/` is older and parameterized for a 20 ns target.
 
-### Prerequisites
+---
 
-- Docker (with non-root access: `sudo usermod -aG docker $USER`)
-- Python 3.8+
-- OpenLane2: `pip install openlane`
-- Sky130 PDK: `volare enable --pdk sky130`
-
-### Flow Configurations
-
-| Config | Top Module | Description |
-|--------|-----------|-------------|
-| `openlane/design2_flat/` | `gemm_top` | Flat flow — full Design2 as one block |
-| `openlane/design2_hier/gemm_pe/` | `gemm_pe` | Hierarchical — harden PE as standalone macro |
-| `openlane/design2_hier/gemm_top/` | `gemm_top` | Hierarchical — top-level with PE black-boxed |
-| `openlane/design1/` | `gemm_top` | Design1 reference (for comparison) |
-
-Please add more as necessary
-
-### Running a Flow
-
-```bash
-cd openlane/scripts
-./run_flow.sh ../design2_flat -tag baseline_20ns
-```
-
-The script copies source files into the config directory, then launches OpenLane2 in Docker. Run outputs go to `runs/` inside each config directory (gitignored).
-
-### Editing Config
-
-Each config directory has:
-- `config.json` — main configuration (clock period, utilization, fanout, etc.)
-- `constraints/base.sdc` — timing constraints
-
-Key parameters in `config.json`:
-```json
-{
-  "DESIGN_NAME": "gemm_top",
-  "CLOCK_PERIOD": 20.0,
-  "pdk::sky130A": {
-    "FP_CORE_UTIL": 40,
-    "PL_TARGET_DENSITY_PCT": 50,
-    "MAX_FANOUT_CONSTRAINT": 128
-  }
-}
-```
-
-- `CLOCK_PERIOD` — target clock in ns. Increase if setup violations occur.
-- `FP_CORE_UTIL` — core utilization %. Higher = smaller die but harder to route.
-- `PL_TARGET_DENSITY_PCT` — placement density. Keep ~10% above `FP_CORE_UTIL`.
-- `MAX_FANOUT_CONSTRAINT` — max fanout per net.
-
-### Hierarchical Flow (Black-Boxing)
-
-1. Harden the PE macro first:
-   ```bash
-   ./run_flow.sh ../design2_hier/gemm_pe -tag pe_v1
-   ```
-2. Update `design2_hier/gemm_top/config.json` — replace placeholder paths with PE run outputs:
-   - `VERILOG_FILES_BLACKBOX` → `runs/<tag>/final/nl/gemm_pe.nl.v`
-   - `EXTRA_LEFS` → `runs/<tag>/final/lef/gemm_pe.lef`
-   - `EXTRA_GDS_FILES` → `runs/<tag>/final/gds/gemm_pe.gds`
-3. Run the top-level:
-   ```bash
-   ./run_flow.sh ../design2_hier/gemm_top -tag top_v1
-   ```
-
-### Viewing Results
-
-**Key report locations** (inside `runs/<tag>/`):
-- `final/metrics.csv` — all metrics (area, timing, power, DRC)
-- `57-openroad-stapostpnr/summary.rpt` — timing summary across all corners
-- `57-openroad-stapostpnr/<corner>/max.rpt` — setup timing paths
-- `57-openroad-stapostpnr/<corner>/min.rpt` — hold timing paths
-- `57-openroad-stapostpnr/<corner>/power.rpt` — power report
-- `final/gds/gemm_top.gds` — layout (open with KLayout)
-
-Note: Step numbers (e.g. `57-`) may vary between runs.
-
-**Extract metrics to terminal:**
-```bash
-python3 openlane/scripts/extract_metrics.py openlane/design2_flat/runs/<tag>
-```
-
-**Compare two runs:**
-```bash
-python3 openlane/scripts/compare_runs.py openlane/design2_flat/runs/<run_a> openlane/design2_flat/runs/<run_b>
-```
-
-**Copy results to Windows Desktop:**
-```bash
-python3 openlane/scripts/extract_results.py              # all runs
-python3 openlane/scripts/extract_results.py design2_flat  # specific design
-```
-
-### Opening Layout in KLayout (WSL)
-
-From Windows PowerShell:
-```
-klayout "\\wsl$\Ubuntu-22.04\home\rohan\ECE755_TPU\openlane\design2_flat\runs\<tag>\final\gds\gemm_top.gds"
-```
-
-### What's Gitignored
-
-Run outputs (`openlane/**/runs/`) and copied source files (`openlane/**/src/`) are excluded from git. Only configs, constraints, and scripts are tracked. Clone and run — no large binaries in the repo.
