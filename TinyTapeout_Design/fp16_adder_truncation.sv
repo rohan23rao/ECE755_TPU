@@ -1,3 +1,26 @@
+///////////////////////////////////////////////////////////////////////////////
+// Module: fp16_adder_truncation.sv
+// Description: Single-path FP16 adder with truncation (no rounding).
+//
+// Merged from fp16_adder.sv and fp16_adder_truncation.sv:
+//   - Single computation path (no near/far split; ks_sub14 no longer used)
+//   - Full LZC normalization via lod_tree_14 (handles all cancellation cases)
+//   - Behavioral +/- operator for add/subtract (smaller than ks_addsub15
+//     at 25 MHz where timing is not a constraint; synthesizer picks area-
+//     optimal adder topology with SYNTH_STRATEGY AREA 3)
+//   - Truncation: sig[13:3] taken directly, no rounding logic
+//   - No NaN/Inf handling (not needed for FP4 product accumulation)
+//   - Flat parallel output mux (better synthesis than nested if-else)
+//
+// Bug fixed vs initial merge: is_underflow previously used `all_zero` from
+// lod_tree_14 directly. When sum[14]=1 (overflow carry-out), sum[13:0]=0
+// causing all_zero=1, which incorrectly triggered is_underflow and produced
+// 0x0000 for valid sums like FP16(1.0)+FP16(1.0)=FP16(2.0).
+// Fix: gate is_underflow with !sum[14] so overflow carry-out is never
+// mistaken for a true zero result.
+//
+// Author: Group5
+///////////////////////////////////////////////////////////////////////////////
 
 module fp16_adder_truncation (
     input  wire [15:0] op_a,
@@ -5,198 +28,166 @@ module fp16_adder_truncation (
     output reg  [15:0] result
 );
 
-    // Unpack op_a
-    wire sa = op_a[15];
-    wire [4:0] ea = op_a[14:10];
-    wire [9:0] ma = op_a[9:0];
+    ///////////////////////////////////////////////////////////////////////////
+    // Unpack
+    ///////////////////////////////////////////////////////////////////////////
+    wire        sa = op_a[15];
+    wire [4:0]  ea = op_a[14:10];
+    wire [9:0]  ma = op_a[9:0];
 
-    // Unpack op_b
-    wire sb = op_b[15];
-    wire [4:0] eb = op_b[14:10];
-    wire [9:0] mb = op_b[9:0];
+    wire        sb = op_b[15];
+    wire [4:0]  eb = op_b[14:10];
+    wire [9:0]  mb = op_b[9:0];
 
-    // Zero, Inf, and Nan checks
-    wire a_is_zero = (ea == 5'd0)  && (ma == 10'd0);
-    wire b_is_zero = (eb == 5'd0)  && (mb == 10'd0);
+    ///////////////////////////////////////////////////////////////////////////
+    // Zero checks (NaN/Inf removed — not produced by FP4 multiplier)
+    ///////////////////////////////////////////////////////////////////////////
+    wire a_is_zero = (ea == 5'd0) && (ma == 10'd0);
+    wire b_is_zero = (eb == 5'd0) && (mb == 10'd0);
 
-    // Reconstruct full significands with leading bit
-    wire [10:0] sig_a = (ea == 5'd0) ? {1'b0, ma} : {1'b1, ma};
-    wire [10:0] sig_b = (eb == 5'd0) ? {1'b0, mb} : {1'b1, mb};
+    ///////////////////////////////////////////////////////////////////////////
+    // Reconstruct significands with leading bit; effective exponent
+    ///////////////////////////////////////////////////////////////////////////
+    wire [10:0] sig_a  = (ea == 5'd0) ? {1'b0, ma} : {1'b1, ma};
+    wire [10:0] sig_b  = (eb == 5'd0) ? {1'b0, mb} : {1'b1, mb};
+    wire [5:0]  eff_ea = (ea == 5'd0) ? 6'd1 : {1'b0, ea};
+    wire [5:0]  eff_eb = (eb == 5'd0) ? 6'd1 : {1'b0, eb};
 
-    wire [5:0] eff_ea = (ea == 5'd0) ? 6'd1 : {1'b0, ea};
-    wire [5:0] eff_eb = (eb == 5'd0) ? 6'd1 : {1'b0, eb};
+    ///////////////////////////////////////////////////////////////////////////
+    // Swap so larger magnitude is "lg"
+    ///////////////////////////////////////////////////////////////////////////
+    wire swap = (eff_eb > eff_ea) || ((eff_eb == eff_ea) && (sig_b > sig_a));
 
-    // Compare effective exponents with leading 0/1 and then determine larger/smaller one to swap
-    logic        swap;
-    logic        s_lg,   s_sm;
-    logic [5:0]  e_lg,   e_sm;
-    logic [10:0] sig_lg, sig_sm;
+    wire        s_lg   = swap ? sb     : sa;
+    wire [5:0]  e_lg   = swap ? eff_eb : eff_ea;
+    wire [5:0]  e_sm   = swap ? eff_ea : eff_eb;
+    wire [10:0] sig_lg = swap ? sig_b  : sig_a;
+    wire [10:0] sig_sm = swap ? sig_a  : sig_b;
 
-    assign swap   = (eff_eb > eff_ea) || ((eff_eb == eff_ea) && (sig_b > sig_a));
+    wire [5:0] exp_diff = e_lg - e_sm;
+    wire       eff_sub  = s_lg ^ (swap ? sa : sb);
 
-    assign s_lg   = swap ? sb     : sa;
-    assign s_sm   = swap ? sa     : sb;
-    assign e_lg   = swap ? eff_eb : eff_ea;
-    assign e_sm   = swap ? eff_ea : eff_eb;
-    assign sig_lg = swap ? sig_b  : sig_a;
-    assign sig_sm = swap ? sig_a  : sig_b;
+    ///////////////////////////////////////////////////////////////////////////
+    // Alignment: right-shift sig_sm by exp_diff (cap at 14)
+    ///////////////////////////////////////////////////////////////////////////
+    wire [4:0]  shift_amt       = (exp_diff > 6'd14) ? 5'd14 : exp_diff[4:0];
+    wire [24:0] sm_wide         = {sig_sm, 14'd0};
+    wire [24:0] sm_shifted_wide = sm_wide >> shift_amt;
+    wire [13:0] sig_sm_aligned  = sm_shifted_wide[24:11];
+    wire        sticky          = (|sm_shifted_wide[10:0]) | (exp_diff > 6'd14);
 
-    logic [5:0] exp_diff;
-    logic       eff_sub;
+    ///////////////////////////////////////////////////////////////////////////
+    // Single add/subtract — behavioral operator
+    //
+    // eff_sub=0 (addition):   sum = sig_lg_ext + sig_sm_aligned
+    // eff_sub=1 (subtraction):sum = sig_lg_ext - sig_sm_aligned - sticky
+    //   The -sticky term accounts for the truncated bits of sig_sm,
+    //   ensuring correct round-towards-zero behaviour on subtraction.
+    //
+    // Synthesizer (AREA 3) will choose a compact ripple-carry or CLA
+    // adder at 25 MHz — no need for the Kogge-Stone ks_addsub15 here.
+    ///////////////////////////////////////////////////////////////////////////
+    wire [13:0] sig_lg_ext = {sig_lg, 3'b000};
 
-    assign exp_diff = e_lg - e_sm;
-    assign eff_sub  = s_lg ^ s_sm;
+    wire [14:0] sum = eff_sub
+        ? ({1'b0, sig_lg_ext} - {1'b0, sig_sm_aligned} - {14'b0, sticky})
+        : ({1'b0, sig_lg_ext} + {1'b0, sig_sm_aligned});
 
-    // Select near path for effective subtractions with exponent difference <= 1
-    // far path is used\ for all additions and larger difference subtractions (this is dual path adder)
-    logic use_near;
-    assign use_near = eff_sub && (exp_diff <= 6'd1);
+    ///////////////////////////////////////////////////////////////////////////
+    // LZC on sum[13:0] for full normalization
+    // NOTE: when sum[14]=1 (overflow carry-out), sum[13:0] is incidentally 0.
+    //       all_zero=1 in that case does NOT mean the result is zero.
+    //       The overflow branch is checked first; all_zero is only meaningful
+    //       when sum[14]=0 (no overflow).
+    ///////////////////////////////////////////////////////////////////////////
+    wire [3:0] lzc;
+    wire       all_zero;
 
-    // Near Path
-
-    // Alignment
-    logic [13:0] near_lg_ext, near_sm_ext;
-
-    assign near_lg_ext = {sig_lg, 3'b000};
-    assign near_sm_ext = (exp_diff == 6'd1) ? {1'b0, sig_sm, 2'b00} : {sig_sm, 3'b000};
-
-    logic [13:0] near_diff;
-
-    ks_sub14 u_near_sub (
-        .a    (near_lg_ext),
-        .b    (near_sm_ext),
-        .diff (near_diff)
+    lod_tree_14 u_lzc (
+        .din      (sum[13:0]),
+        .lzc      (lzc),
+        .all_zero (all_zero)
     );
 
-    // Count leading zeros in the near difference to determine normalization shift
-    logic [3:0] near_lzc;
-    logic       near_all_zero;
-
-    lod_tree_14 u_near_lzc (
-        .din      (near_diff),
-        .lzc      (near_lzc),
-        .all_zero (near_all_zero)
-    );
-
-    // Normalize near result
-    logic [5:0]  near_exp;
-    logic [13:0] near_shifted;
-    logic [10:0] near_sig;
+    ///////////////////////////////////////////////////////////////////////////
+    // Normalization
+    //
+    // sum[14]=1 (overflow carry-out): leading 1 is at bit 14.
+    //   sig at [14:4], norm_exp = e_lg + 1
+    //
+    // lzc=0 (bit 13=1, already normalized): sig at [13:3], norm_exp = e_lg
+    //
+    // lzc>0 (leading zeros — cancellation from subtraction):
+    //   left-shift by lzc, clamped so norm_exp >= 1 (subnormal floor)
+    //
+    // all_zero (sum=0): result is zero — only reachable when sum[14]=0
+    ///////////////////////////////////////////////////////////////////////////
+    logic [3:0]  left_shift;
+    logic [5:0]  norm_exp;
+    logic [14:0] norm_sum;
 
     always_comb begin
-        near_shifted = 14'd0;
-        near_exp     = 6'd0;
-        near_sig     = 11'd0;
+        left_shift = 4'd0;
+        norm_exp   = e_lg;
+        norm_sum   = sum;
 
-        if (!near_all_zero) begin
-            if ({2'b0, near_lzc} >= e_lg && e_lg > 6'd0) begin
-                near_shifted = near_diff << (e_lg - 6'd1);
-                near_exp     = 6'd1;
-            end else begin
-                near_shifted = near_diff << near_lzc;
-                near_exp     = e_lg - {2'b0, near_lzc};
-            end
-            near_sig = near_shifted[13:3];
-        end
-    end
-
-    // Near path: truncate (no rounding)
-    logic [5:0] near_post_exp;
-    logic [9:0] near_post_mant;
-
-    assign near_post_exp  = (!near_sig[10])    ? 6'd0   :
-                            (near_exp == 6'd0)  ? 6'd1   :
-                                                   near_exp;
-    assign near_post_mant = near_sig[9:0];
-
-    // Far Path
-
-    // Alignment
-    logic [13:0] far_lg_ext, far_sm_aligned;
-    logic [4:0]  far_shift;
-    logic [24:0] far_sm_wide, far_sm_shifted;
-    logic        far_sticky_shift;
-
-    assign far_lg_ext      = {sig_lg, 3'b000};
-    assign far_shift       = (exp_diff > 6'd14) ? 5'd14 : exp_diff[4:0];
-    assign far_sm_wide     = {sig_sm, 14'd0};
-    assign far_sm_shifted  = far_sm_wide >> far_shift;
-    assign far_sm_aligned  = far_sm_shifted[24:11];
-    assign far_sticky_shift = (|far_sm_shifted[10:0]) | (exp_diff > 6'd14);
-
-    // Add or subtract the aligned significands
-    logic [14:0] far_sum;
-
-    ks_addsub15 u_far_addsub (
-        .a         ({1'b0, far_lg_ext}),
-        .b         ({1'b0, far_sm_aligned}),
-        .mode_sub  (eff_sub),
-        .borrow_in (far_sticky_shift),
-        .result    (far_sum)
-    );
-
-    // 1-bit normalization of the far sum
-    logic [5:0]  far_norm_exp;
-    logic [14:0] far_norm_sum;
-
-    always_comb begin
-        if (far_sum[14]) begin
-            far_norm_exp = e_lg + 6'd1;
-            far_norm_sum = far_sum;
-        end else if (!far_sum[13]) begin
-            if (e_lg > 6'd1) begin
-                far_norm_exp = e_lg - 6'd1;
-                far_norm_sum = far_sum << 1;
-            end else begin
-                far_norm_exp = e_lg;
-                far_norm_sum = far_sum;
-            end
+        if (sum[14]) begin
+            norm_exp = e_lg + 6'd1;
+            norm_sum = sum;
+        end else if (all_zero) begin
+            norm_exp = 6'd0;
+            norm_sum = 15'd0;
         end else begin
-            far_norm_exp = e_lg;
-            far_norm_sum = far_sum;
+            // Clamped left shift
+            if (e_lg <= 6'd1)
+                left_shift = 4'd0;
+            else if ({2'b0, lzc} > (e_lg - 6'd1))
+                left_shift = e_lg[3:0] - 4'd1;
+            else
+                left_shift = lzc;
+
+            norm_sum = sum << left_shift;
+            norm_exp = (left_shift == 4'd0) ? e_lg
+                                            : e_lg - {2'b00, left_shift};
         end
     end
 
-    // Far path: truncate (no rounding)
-    logic [10:0] far_trunc_sig;
-    logic [5:0]  far_post_exp;
-    logic [9:0]  far_post_mant;
+    ///////////////////////////////////////////////////////////////////////////
+    // Truncation: extract 11-bit significand, no rounding
+    // Overflow case (sum[14]=1): take sum[14:4] (sig spans bits 14..4)
+    // All other cases:           take norm_sum[13:3]
+    ///////////////////////////////////////////////////////////////////////////
+    wire [10:0] trunc_sig  = sum[14] ? sum[14:4] : norm_sum[13:3];
+    wire [5:0]  post_exp   = (!trunc_sig[10])   ? 6'd0      :
+                             (norm_exp == 6'd0)  ? 6'd1      :
+                                                    norm_exp;
+    wire [9:0]  post_mant  = trunc_sig[9:0];
 
-    assign far_trunc_sig = far_sum[14] ? far_norm_sum[14:4] : far_norm_sum[13:3];
+    ///////////////////////////////////////////////////////////////////////////
+    // Flat parallel output mux
+    //
+    // is_underflow fix: gate with !sum[14].
+    //   When sum[14]=1, sum[13:0]=0 makes all_zero=1 spuriously.
+    //   Without the !sum[14] guard, FP16(x)+FP16(x) — any pair with equal
+    //   exponents — would incorrectly produce 0x0000.
+    ///////////////////////////////////////////////////////////////////////////
+    wire is_both_zero   =  a_is_zero &  b_is_zero;
+    wire is_only_a_zero =  a_is_zero & ~b_is_zero;
+    wire is_only_b_zero =  b_is_zero & ~a_is_zero;
+    wire is_overflow    = ~a_is_zero & ~b_is_zero & (post_exp >= 6'd31);
+    wire is_underflow   = ~a_is_zero & ~b_is_zero & ~sum[14]
+                        & (post_exp == 6'd0) & (post_mant == 10'd0)
+                        & ~trunc_sig[10];
+    wire is_normal      = ~is_both_zero & ~is_only_a_zero & ~is_only_b_zero
+                        & ~is_overflow  & ~is_underflow;
 
-    assign far_post_exp  = (!far_trunc_sig[10])    ? 6'd0              :
-                           (far_norm_exp == 6'd0)   ? 6'd1              :
-                                                       far_norm_exp;
-    assign far_post_mant = far_trunc_sig[9:0];
-
-    // Select near or far path result
-    logic [5:0] post_exp;
-    logic [9:0] post_mant;
-
-    assign post_exp  = use_near ? near_post_exp  : far_post_exp;
-    assign post_mant = use_near ? near_post_mant : far_post_mant;
-
-    logic [10:0] trunc_sig;
-    assign trunc_sig = use_near ? near_sig : far_trunc_sig;
-
-    // Output mux flat
-    logic       is_both_zero, is_only_a_zero, is_only_b_zero;
-    logic       is_overflow, is_underflow, is_normal;
-
-    assign is_both_zero   = a_is_zero & b_is_zero;
-    assign is_only_a_zero = a_is_zero & ~b_is_zero;
-    assign is_only_b_zero = b_is_zero & ~a_is_zero;
-    assign is_overflow    = ~a_is_zero & ~b_is_zero & (post_exp >= 6'd31);
-    assign is_underflow   = ~a_is_zero & ~b_is_zero & (post_exp == 6'd0) & (post_mant == 10'd0) & ~trunc_sig[10];
-    assign is_normal = ~is_both_zero & ~is_only_a_zero & ~is_only_b_zero & ~is_overflow & ~is_underflow;
-
-    // Selects in parallel
     always_comb begin
-        result = ({16{is_both_zero}}               & {sa & sb, 15'd0})
-               | ({16{is_only_a_zero}}             & op_b)
-               | ({16{is_only_b_zero}}             & op_a)
-               | ({16{is_overflow}}                & {s_lg, 5'b11111, 10'd0})
-               | ({16{is_underflow}}               & 16'h0000)
-               | ({16{is_normal}}                  & {s_lg, post_exp[4:0], post_mant});
+        result = ({16{is_both_zero}}   & {sa & sb, 15'd0})
+               | ({16{is_only_a_zero}} & op_b)
+               | ({16{is_only_b_zero}} & op_a)
+               | ({16{is_overflow}}    & {s_lg, 5'b11111, 10'd0})
+               | ({16{is_underflow}}   & 16'h0000)
+               | ({16{is_normal}}      & {s_lg, post_exp[4:0], post_mant});
     end
+
 endmodule
