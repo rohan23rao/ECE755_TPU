@@ -1,30 +1,15 @@
 ///////////////////////////////////////////////////////////////////////////////
 // Module: gemm_control_unit.sv
 // Description: Control Unit for the FP4 GEMM Tiny Tapeout (1xN) design.
-//              Wraps gemm_fsm and generates all hardware control signals.
 //
-// Responsibilities:
-//   H_PE_EN / V_PE_EN  : stream-cycle-gated systolic enables
-//   ld_bias / bias_bus  : one-hot column bias load from input bus in LOAD
-//   scale_reg capture   : {ui_in, uio_in} stored on LOAD sub-phases NCOLS..2*NCOLS-1
-//   quant_en            : per-column staggered drain sequencing (no col_sel)
-//   scale               : muxed from scale_reg per active quant column
-//   uio_oe / uio_out    : all-output during DRAIN, carries FP4 results
-//   uo_out              : 8-bit status bus (always output)
+// FLUSH ping-pong protocol (derived from flush_cnt[0]):
+//   flush_cnt[0]=0 (even): uio_oe=0x00, host drives {ui_in,uio_in}=16-bit scale.
+//     capture_en=1 → VU computes and latches y_reg this cycle.
+//   flush_cnt[0]=1 (odd):  uio_oe=0xFF, chip drives y_out on uio_out[7:4].
+//     result_valid=1, host reads y_out.
 //
-// PE enable derivation for 1xN array (ROWS=1, 1 cycle per hop east):
-//   H_PE_EN[0] = pe_en_0: active for stream_cnt in [0, K-1]  (scalar, ROWS=1)
-//   V_PE_EN[0] = pe_en_0: col 0 active same window
-//   V_PE_EN[1] = pe_en_1: col 1 delayed 1 cycle (if COL_CONFIG >= 1)
-//   V_PE_EN[2] = pe_en_2: col 2 delayed 2 cycles (if COL_CONFIG == 2)
-//
-// Quant stagger (no SA-to-VU pipeline flop):
-//   Col j < NCOLS-1: quant_en[j] fires at stream_cnt == K + j  (during STREAM)
-//   Col NCOLS-1    : quant_en[NCOLS-1] fires at drain_cnt == 0 (during DRAIN)
-//
-// Drain output table (uio_out):
-//   drain_cnt=0: 1x1 → 8'h00            1x2 → {0,y[0]}      1x3 → {y[1],y[0]}
-//   drain_cnt=1: 1x1 → {4'b0,y[0]}      1x2 → {y[1],y[0]}   1x3 → {4'b0,y[2]}
+//   col_sel = flush_cnt[2:1]  (advances every 2 cycles)
+//   FLUSH runs 2*NCOLS cycles total; tile_done on last odd cycle.
 //
 // Author: Group5
 ///////////////////////////////////////////////////////////////////////////////
@@ -38,41 +23,41 @@ module gemm_control_unit #(
     input  logic        clk,
     input  logic        rst_n,
 
-    // Tiny Tapeout pin inputs
     input  logic [7:0]  ui_in,
     input  logic [7:0]  uio_in,
 
-    // Vector unit FP4 result bus: y_out_vec[col][3:0]
-    input  logic [COLS-1:0][FP4_WIDTH-1:0]  y_out_vec,
+    // FP4 result from shared vector unit
+    input  logic [FP4_WIDTH-1:0]    y_out,
 
     // Systolic array control
-    output logic [ROWS-1:0]     H_PE_EN,    // 1-bit for ROWS=1
-    output logic [COLS-1:0]     V_PE_EN,    // one per column
-    output logic [ACC_WIDTH-1:0] bias_bus,  // 16-bit bias to SA bias port
-    output logic [COLS-1:0]     ld_bias,    // one-hot column bias load pulse
+    output logic [ROWS-1:0]          H_PE_EN,
+    output logic [COLS-1:0]          V_PE_EN,
+    output logic [ACC_WIDTH-1:0]     bias_bus,
+    output logic [COLS-1:0]          ld_bias,
 
     // Vector unit control
-    output logic [COLS-1:0]     quant_en,   // per-column quantization enable
-    output logic                relu_en,    // ReLU enable from config register
-    output logic [ACC_WIDTH-1:0] scale,     // scale muxed per active quant column
+    output logic                     capture_en,  // even FLUSH cycles: latch VU result
+    output logic                     relu_en,
+    output logic [1:0]               col_sel,     // selects SA column to feed VU
 
-    // Tiny Tapeout pin outputs
-    output logic [7:0]  uio_out,    // bidir data (FP4 results during DRAIN)
-    output logic [7:0]  uio_oe,     // bidir output enable (FF during DRAIN)
-    output logic [7:0]  uo_out      // status bus (always output)
+    // TT pin outputs
+    output logic [7:0]  uio_out,
+    output logic [7:0]  uio_oe,
+    output logic [7:0]  uo_out
 );
 
     ///////////////////////////////////////////////////////////////////////////
-    // FSM instantiation
+    // FSM
     ///////////////////////////////////////////////////////////////////////////
     logic [2:0]  state;
-    logic [2:0]  load_cnt;      // widened to [2:0] for 1xN
+    logic [2:0]  load_cnt;
     logic [8:0]  stream_cnt;
-    logic        drain_cnt;
+    logic [2:0]  flush_cnt;
     logic [7:0]  K_LEN_r;
-    logic [1:0]  COL_CONFIG_r;  // 00=1x1, 01=1x2, 10=1x3
-    logic        RELU_EN_r, SKIP_BIAS_r, SKIP_SCALE_r;
-    logic        load_active, stream_active, drain_active, tile_done;
+    logic [1:0]  COL_CONFIG_r;
+    logic        RELU_EN_r, SKIP_BIAS_r;
+    logic        load_active, stream_active, flush_active;
+    logic        tile_done;
 
     gemm_fsm u_fsm (
         .clk          (clk),
@@ -82,27 +67,19 @@ module gemm_control_unit #(
         .state_out    (state),
         .load_cnt     (load_cnt),
         .stream_cnt   (stream_cnt),
-        .drain_cnt    (drain_cnt),
+        .flush_cnt    (flush_cnt),
         .K_LEN_r      (K_LEN_r),
         .COL_CONFIG_r (COL_CONFIG_r),
         .RELU_EN_r    (RELU_EN_r),
         .SKIP_BIAS_r  (SKIP_BIAS_r),
-        .SKIP_SCALE_r (SKIP_SCALE_r),
         .load_active  (load_active),
         .stream_active(stream_active),
-        .drain_active (drain_active),
+        .flush_active (flush_active),
         .tile_done    (tile_done)
     );
 
     ///////////////////////////////////////////////////////////////////////////
     // PE enable chain
-    //
-    // pe_en_0: base enable, high while stream_cnt < K_LEN_r
-    // pe_en_1: 1-cycle flop delay of pe_en_0 (col 1 stagger)
-    // pe_en_2: 1-cycle flop delay of pe_en_1 (col 2 stagger)
-    //
-    // H_PE_EN: scalar (ROWS=1), always pe_en_0
-    // V_PE_EN[j]: gated by COL_CONFIG_r to suppress non-existent columns
     ///////////////////////////////////////////////////////////////////////////
     logic [8:0] K_ext;
     assign K_ext = {1'b0, K_LEN_r};
@@ -120,17 +97,13 @@ module gemm_control_unit #(
         end
     end
 
-    assign H_PE_EN    = pe_en_0;                                  // scalar (ROWS=1)
+    assign H_PE_EN    = pe_en_0;
     assign V_PE_EN[0] = pe_en_0;
     assign V_PE_EN[1] = pe_en_1 & (COL_CONFIG_r >= 2'd1);
     assign V_PE_EN[2] = pe_en_2 & (COL_CONFIG_r == 2'd2);
 
     ///////////////////////////////////////////////////////////////////////////
     // ld_bias and bias_bus
-    //
-    // LOAD sub-phases 0..NCOLS-1: one-hot ld_bias[j] per cycle.
-    // bias_bus = {ui_in, uio_in}.
-    // Skipped entirely when SKIP_BIAS_r is set (load_cnt jumps to NCOLS).
     ///////////////////////////////////////////////////////////////////////////
     always_comb begin
         ld_bias  = 3'b000;
@@ -144,96 +117,35 @@ module gemm_control_unit #(
     end
 
     ///////////////////////////////////////////////////////////////////////////
-    // Scale registers
+    // FLUSH ping-pong control
     //
-    // NCOLS = COL_CONFIG_r + 1
-    // scale_reg[j] captured at load_cnt == NCOLS + j = COL_CONFIG_r + 1 + j
-    //   1x1: scale_reg[0] at load_cnt=1
-    //   1x2: scale_reg[0] at load_cnt=2, scale_reg[1] at load_cnt=3
-    //   1x3: scale_reg[0] at load_cnt=3, scale_reg[1] at load_cnt=4, [2] at 5
+    // flush_cnt[0]=0 (even): input  phase — host drives scale, VU captures
+    // flush_cnt[0]=1 (odd) : output phase — chip drives y_out, host reads
     //
-    // Preserved across tiles when SKIP_SCALE_r is set.
+    // col_sel advances every 2 cycles: flush_cnt[2:1]
     ///////////////////////////////////////////////////////////////////////////
-    logic [ACC_WIDTH-1:0] scale_reg [0:COLS-1];
+    assign capture_en = flush_active && !flush_cnt[0];
+    assign col_sel    = flush_cnt[2:1];
+    assign relu_en    = RELU_EN_r;
 
-    always_ff @(posedge clk) begin
-        if (load_active && !SKIP_SCALE_r) begin
-            if (load_cnt == ({1'b0, COL_CONFIG_r} + 3'd1)) scale_reg[0] <= {ui_in, uio_in};
-            if (load_cnt == ({1'b0, COL_CONFIG_r} + 3'd2)) scale_reg[1] <= {ui_in, uio_in};
-            if (load_cnt == ({1'b0, COL_CONFIG_r} + 3'd3)) scale_reg[2] <= {ui_in, uio_in};
-        end
-    end
+    assign uio_oe  = (flush_active &&  flush_cnt[0]) ? 8'hFF : 8'h00;
+    assign uio_out = (flush_active &&  flush_cnt[0]) ? {y_out, 4'b0000} : 8'h00;
 
     ///////////////////////////////////////////////////////////////////////////
-    // Quantization control
+    // Status bus uo_out[7:0]
     //
-    // Col j < NCOLS-1: quant_en[j] fires during STREAM at stream_cnt == K + j
-    // Col NCOLS-1    : quant_en[NCOLS-1] fires during DRAIN at drain_cnt == 0
-    //
-    // Encoding by COL_CONFIG_r:
-    //   1x1 (COL_CONFIG=0): only col 0, fires at drain_cnt==0
-    //   1x2 (COL_CONFIG=1): col 0 fires at stream_cnt==K; col 1 at drain_cnt==0
-    //   1x3 (COL_CONFIG=2): col 0 at K; col 1 at K+1; col 2 at drain_cnt==0
-    //
-    // scale: driven from scale_reg[j] matching the active quant column
-    ///////////////////////////////////////////////////////////////////////////
-    assign quant_en[0] = (COL_CONFIG_r == 2'd0) ? (drain_active  && drain_cnt == 1'b0)
-                                                 : (stream_active && stream_cnt == K_ext);
-
-    assign quant_en[1] = (COL_CONFIG_r == 2'd1) ? (drain_active  && drain_cnt == 1'b0)      :
-                         (COL_CONFIG_r == 2'd2) ? (stream_active && stream_cnt == K_ext + 9'd1)
-                                                : 1'b0;  // col 1 absent in 1x1
-
-    assign quant_en[2] = (COL_CONFIG_r == 2'd2) && drain_active && (drain_cnt == 1'b0);
-
-    // Scale: priority-mux on active quant column (only one fires per cycle)
-    assign scale = quant_en[0] ? scale_reg[0] :
-                   quant_en[1] ? scale_reg[1] :
-                                 scale_reg[2];
-
-    assign relu_en = RELU_EN_r;
-
-    ///////////////////////////////////////////////////////////////////////////
-    // Bidirectional pin control
-    //
-    // uio_oe: all-output during DRAIN, all-input otherwise
-    // uio_out: drain output table (see module header)
-    //   drain_cnt=0: 1x1→00  1x2→{0,y[0]}  1x3→{y[1],y[0]}
-    //   drain_cnt=1: 1x1→{0,y[0]}  1x2→{y[1],y[0]}  1x3→{0,y[2]}
-    ///////////////////////////////////////////////////////////////////////////
-    assign uio_oe = drain_active ? 8'hFF : 8'h00;
-
-    always_comb begin
-        uio_out = 8'h00;
-        if (drain_active) begin
-            case (COL_CONFIG_r)
-                2'd0: // 1x1
-                    uio_out = drain_cnt ? {4'b0, y_out_vec[0]} : 8'h00;
-                2'd1: // 1x2
-                    uio_out = drain_cnt ? {y_out_vec[1], y_out_vec[0]}
-                                       : {4'b0, y_out_vec[0]};
-                default: // 1x3
-                    uio_out = drain_cnt ? {4'b0, y_out_vec[2]}
-                                       : {y_out_vec[1], y_out_vec[0]};
-            endcase
-        end
-    end
-
-    ///////////////////////////////////////////////////////////////////////////
-    // Status bus: uo_out[7:0] (always output)
-    //
-    //   [2:0]  phase     : FSM state encoding
-    //   [3]    busy      : 1 in any non-IDLE state
-    //   [4]    drain_valid: 1 during both DRAIN cycles
-    //   [5]    drain_cnt : 0=first drain cycle, 1=second
-    //   [6]    tile_done : 1-cycle pulse on last DRAIN cycle
-    //   [7]    BLANK
+    //   [2:0]  phase        : FSM state
+    //   [3]    busy         : non-IDLE
+    //   [4]    result_valid : odd FLUSH cycle — y_out is valid on uio_out[7:4]
+    //   [5]    tile_done    : 1-cycle pulse on last FLUSH cycle
+    //   [6]    flush_cnt[0] : ping-pong phase indicator (0=input, 1=output)
+    //   [7]    0
     ///////////////////////////////////////////////////////////////////////////
     assign uo_out[2:0] = state;
     assign uo_out[3]   = (state != 3'b000);
-    assign uo_out[4]   = drain_active;
-    assign uo_out[5]   = drain_active && drain_cnt;
-    assign uo_out[6]   = tile_done;
+    assign uo_out[4]   = flush_active && flush_cnt[0];
+    assign uo_out[5]   = tile_done;
+    assign uo_out[6]   = flush_cnt[0];
     assign uo_out[7]   = 1'b0;
 
 endmodule

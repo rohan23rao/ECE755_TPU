@@ -1,39 +1,47 @@
-module vector_unit #(
-    parameter int FP16_WIDTH = 16, // FP16 scale factor
-    parameter int FP4_WIDTH = 4,   // FP4 quantization width
-    parameter int LANES = 3        // Number of parallel lanes
-) (
-    input logic clk,
-    input logic relu_en,
-    input logic  [LANES-1:0] quant_en,  // Per-lane quantization enable signals
-    input logic  [LANES-1:0][FP16_WIDTH-1:0] col_out,  // 2 FP16 input data
-    input logic  [FP16_WIDTH-1:0]            scale,    // 1 FP16 data for one cycle, quantize column by column
+///////////////////////////////////////////////////////////////////////////////
+// Module: vector_unit.sv
+// Description: Shared single-lane FP16->FP4 quantizer for the 1xN GEMM core.
+//
+//   Ping-pong FLUSH protocol:
+//     Even FLUSH cycles (capture_en=1): col_out + scale_in valid from host.
+//       VU computes y_comb combinatorially; y_reg captures on clock edge.
+//     Odd  FLUSH cycles (capture_en=0): y_reg holds result for host readback.
+//
+//   No combinational path from input pins to output pins:
+//     scale_in → FloatP16x4 → y_comb → [y_reg FF] → y_out
+//
+// Author: Group5
+///////////////////////////////////////////////////////////////////////////////
 
-    output logic [LANES-1:0][FP4_WIDTH-1:0]  y_out     // 2 FP4 quantized output data
+module vector_unit (
+    input  logic        clk,
+    input  logic        rst_n,
+    input  logic        capture_en,     // even FLUSH cycles: compute and latch
+    input  logic        relu_en,
+    input  logic [15:0] col_out,        // FP16 accumulator from selected SA col
+    input  logic [15:0] scale_in,       // full 16-bit FP16 scale from {ui_in, uio_in}
+    output logic  [3:0] y_out           // FP4 E2M1 quantized result
 );
 
-	logic [LANES-1:0][FP16_WIDTH-1:0] quant_in;    // Muxed input for quantization
-	logic [LANES-1:0][FP16_WIDTH-1:0] quant_scale;  // Muxed scale for quantization
-	logic [LANES-1:0][FP4_WIDTH-1:0]  reg_out;      // Register to hold quantized output after RELU
-	logic [LANES-1:0][FP4_WIDTH-1:0]  mult_out;     // Output of the FP16 multiplication before quantization
+    logic [15:0] col_in_muxed;
+    logic [15:0] scale_muxed;
+    logic  [3:0] y_comb;
+    logic  [3:0] y_reg;
 
-	genvar i;
-	generate 
-		for (i=0; i<LANES; i=i+1) begin : gen_scale_data_reg
+    assign col_in_muxed = (relu_en && col_out[15]) ? '0 : col_out;
+    assign scale_muxed  = (relu_en && col_out[15]) ? '0 : scale_in;
 
-		   // Mux logic: If RELU is enabled and data is negative, or if quantization is disabled, set quantization input and scale to 0; otherwise, use the original data and scale
-		   assign quant_in[i]      = ((relu_en && col_out[i][FP16_WIDTH - 1]) || (!quant_en[i])) ? '0 : col_out[i]; 
-		   assign quant_scale[i]   = ((relu_en && col_out[i][FP16_WIDTH - 1]) || (!quant_en[i])) ? '0 : scale;
+    FloatP16x4 u_q (
+        .A   (scale_muxed),
+        .B   (col_in_muxed),
+        .Out (y_comb)
+    );
 
-		   FloatP16x4 iFloat (.A(quant_scale[i]), .B(quant_in[i]), .Out(mult_out[i])); // FP16 multiplier instance for quantization scaling
-
-		   // RELU clamping & Quantization logic
-		   always_ff @(posedge clk) begin
-			 if (quant_en[i])
-					reg_out[i] <= mult_out[i]; // take sign bit, MSB of mantissa, and 2 MSBs of exponent for FP4 E2M1
-			end
-		
-			assign y_out[i] = reg_out[i]; // For debugging: output the quantized value of each lane directly to data_out bits
+    always_ff @(posedge clk, negedge rst_n) begin
+        if (capture_en) begin
+            y_reg <= y_comb;
 		end
-	endgenerate
+    end
+
+    assign y_out = y_reg;
 endmodule
