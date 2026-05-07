@@ -1,8 +1,7 @@
 ///////////////////////////////////////////////////////////////////////////////
 // Module: gemm_systolic_array.sv
 // Description: 1xN Systolic Array for GEMM compute (Tiny Tapeout).
-//              ROWS is hardcoded to 1 at synthesis; COLS is the runtime-
-//              configurable column count (max 3, gated externally via V_PE_EN).
+//              ROWS is hardcoded to 1 at synthesis; COLS=2 for 1x2 design.
 //
 //              Data flow:
 //                Activations  : single row enters left edge (col 0), flow EAST
@@ -16,7 +15,6 @@
 //
 //              Output:
 //                sa_out[COLS-1:0][ACC_WIDTH-1:0] — 1D, one acc per column
-//                (no row index needed with ROWS=1)
 //
 // Connections:
 //   i_col[0]      → PE[0][0].a_in
@@ -34,7 +32,7 @@
 
 module gemm_systolic_array #(
     parameter ROWS       = 1,
-    parameter COLS       = 3,
+    parameter COLS       = 2,
     parameter ACT_WIDTH  = 4,
     parameter WGT_WIDTH  = 4,
     parameter ACC_WIDTH  = 16
@@ -62,11 +60,6 @@ module gemm_systolic_array #(
 
     ///////////////////////////////////////////////////////////////////////////
     // Internal mesh wires
-    // a_mesh   : activations flow east  — [row][col_boundary]
-    // w_mesh   : weights flow south     — [row_boundary][col]
-    // h_en_mesh: h-enable flows east    — [row][col_boundary]
-    // v_en_mesh: v-enable flows south   — [row_boundary][col]
-    // acc_mesh : accumulator per PE     — [row][col]
     ///////////////////////////////////////////////////////////////////////////
     logic [ROWS-1:0][COLS:0][ACT_WIDTH-1:0]    a_mesh;
     logic [ROWS:0][COLS-1:0][WGT_WIDTH-1:0]    w_mesh;
@@ -79,12 +72,12 @@ module gemm_systolic_array #(
     ///////////////////////////////////////////////////////////////////////////
     genvar i, j;
     generate
-        for (i = 0; i < ROWS; i++) begin : boundary_h
+        for (i = 0; i < ROWS; i = i + 1) begin : boundary_h
             assign a_mesh[i][0]    = i_col[i];
             assign h_en_mesh[i][0] = h_pe_en[i];
         end
 
-        for (j = 0; j < COLS; j++) begin : boundary_v
+        for (j = 0; j < COLS; j = j + 1) begin : boundary_v
             assign w_mesh[0][j]    = w_row[j];
             assign v_en_mesh[0][j] = v_pe_en[j];
         end
@@ -93,17 +86,17 @@ module gemm_systolic_array #(
     // Bias demux — one entry per column
     logic [COLS-1:0][ACC_WIDTH-1:0] bias_col;
     generate
-        for (j = 0; j < COLS; j++) begin : bias_demux
+        for (j = 0; j < COLS; j = j + 1) begin : bias_demux
             assign bias_col[j] = ld_bias[j] ? bias : '0;
         end
     endgenerate
 
     ///////////////////////////////////////////////////////////////////////////
-    // PE grid — ROWS x COLS (1x3 for Tiny Tapeout target)
+    // PE grid — ROWS x COLS (1x2 for Tiny Tapeout)
     ///////////////////////////////////////////////////////////////////////////
     generate
-        for (i = 0; i < ROWS; i++) begin : row_gen
-            for (j = 0; j < COLS; j++) begin : col_gen
+        for (i = 0; i < ROWS; i = i + 1) begin : row_gen
+            for (j = 0; j < COLS; j = j + 1) begin : col_gen
                 gemm_pe pe_inst (
                     .clk      (clk),
 
@@ -128,10 +121,9 @@ module gemm_systolic_array #(
 
     ///////////////////////////////////////////////////////////////////////////
     // Output: sa_out[j] = acc_mesh[0][j]
-    // 1D — no row index needed with ROWS=1
     ///////////////////////////////////////////////////////////////////////////
     generate
-        for (j = 0; j < COLS; j++) begin : col_out_gen
+        for (j = 0; j < COLS; j = j + 1) begin : col_out_gen
             assign sa_out[j] = acc_mesh[0][j];
         end
     endgenerate
