@@ -1,7 +1,7 @@
 module vector_unit #(
     parameter int FP16_WIDTH = 16, // FP16 scale factor
     parameter int FP4_WIDTH = 4,   // FP4 quantization width
-    parameter int LANES = 2        // Number of parallel lanes
+    parameter int LANES = 3        // Number of parallel lanes
 ) (
     input logic clk,
     input logic relu_en,

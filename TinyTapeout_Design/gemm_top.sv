@@ -1,56 +1,61 @@
 ///////////////////////////////////////////////////////////////////////////////
 // Module: gemm_top.sv
-// Description: Tiny Tapeout top-level wrapper for the FP4 GEMM 2x2 Core.
+// Description: Tiny Tapeout top-level wrapper for the FP4 GEMM 1xN Core.
 //
 // Integrates:
 //   gemm_control_unit  : FSM + all datapath control signals
-//   gemm_systolic_array: 2x2 output-stationary PE mesh
-//   vector_unit        : 2-lane FP16->FP4 quantizer
+//   gemm_systolic_array: 1xN output-stationary PE mesh (ROWS=1, COLS=3)
+//   vector_unit        : 3-lane FP16->FP4 quantizer
 //
 // Pin mapping:
 //   ui_in[7:0]  : primary input bus
-//     [3:0]  a_row0 (FP4 activation, row 0) during STREAM
-//     [7:4]  a_row1 (FP4 activation, row 1) during STREAM
-//     [7:0]  K_LEN[7:0]                     during CFG
-//     [7:0]  bias/scale upper byte           during LOAD
-//     [0]    START pulse                     during IDLE
+//     [3:0]  a_row0   (FP4 activation, single row)    during STREAM
+//     [7:4]  w_col0   (FP4 weight, col 0)             during STREAM
+//     [7:0]  K_LEN[7:0]                               during CFG
+//     [7:0]  bias/scale upper byte                    during LOAD
+//     [0]    START pulse                               during IDLE
 //
 //   uio[7:0] : bidirectional bus, direction set per phase
 //     Input during IDLE/CFG/LOAD/STREAM:
-//       [2:0]  {SKIP_SCALE, SKIP_BIAS, RELU_EN}  during CFG
-//       [7:0]  bias/scale lower byte              during LOAD
-//       [3:0]  w_col0 (FP4 weight, col 0)         during STREAM
-//       [7:4]  w_col1 (FP4 weight, col 1)         during STREAM
+//       [0]    RELU_EN                                 during CFG
+//       [1]    SKIP_BIAS                               during CFG
+//       [2]    SKIP_SCALE                              during CFG
+//       [4:3]  COL_CONFIG[1:0]  (00=1x1,01=1x2,10=1x3) during CFG
+//       [7:0]  bias/scale lower byte                  during LOAD
+//       [3:0]  w_col1 (FP4 weight, col 1)             during STREAM
+//       [7:4]  w_col2 (FP4 weight, col 2)             during STREAM
 //     Output during DRAIN:
-//       [3:0]  y_row0 (FP4 result, row 0 of current column)
-//       [7:4]  y_row1 (FP4 result, row 1 of current column)
+//       drain_cnt=0: 1x1→8'h00          1x2→{0,y[0]}      1x3→{y[1],y[0]}
+//       drain_cnt=1: 1x1→{4'b0,y[0]}   1x2→{y[1],y[0]}   1x3→{4'b0,y[2]}
 //
 //   uo_out[7:0] : status bus (always output, never carries data)
-//     [2:0]  phase[2:0]   FSM state
+//     [2:0]  phase[2:0]    FSM state
 //     [3]    busy
 //     [4]    drain_valid
-//     [5]    drain_col    0=col0, 1=col1
-//     [6]    tile_done    1-cycle pulse
+//     [5]    drain_cnt     0=first drain cycle, 1=second
+//     [6]    tile_done     1-cycle pulse
 //     [7]    reserved (0)
 //
 // Data flow:
-//   Activations : ui_in[3:0]/[7:4] -> i_col[0]/[1] -> systolic array
-//   Weights     : uio_in[3:0]/[7:4] -> w_row[0]/[1] -> systolic array
-//   Accumulators: sa_out[col_sel][row] -> col_out[row] -> vector unit
-//   Results     : y_out[1:0] -> {uio_out[7:4], uio_out[3:0]} during DRAIN
+//   Activations : ui_in[3:0]             -> i_col[0]    -> systolic array row 0
+//   Weights     : ui_in[7:4]/uio_in[3:0]/uio_in[7:4]
+//                                        -> w_row[0/1/2] -> systolic array top
+//   Accumulators: sa_out[j] (1D, ROWS=1) -> col_out[j]  -> vector unit lane j
+//   Results     : y_out[2:0]             -> uio_out per drain table
 //
-// Note: No pipeline flop between systolic array and vector unit (removed
-//       vs. original 8x8 design; wire distances are negligible in 2x2).
+// Note: No pipeline flop between systolic array and vector unit.
+//       col_sel mux removed; sa_out is 1D (one acc per column, ROWS=1).
 //
 // Author: Group5
 ///////////////////////////////////////////////////////////////////////////////
 
 module gemm_top #(
-    parameter ARRAY_SIZE = 2,
-    parameter ACT_WIDTH  = 4,
-    parameter WGT_WIDTH  = 4,
-    parameter ACC_WIDTH  = 16,
-    parameter FP4_WIDTH  = 4
+    parameter ROWS      = 1,
+    parameter COLS      = 3,
+    parameter ACT_WIDTH = 4,
+    parameter WGT_WIDTH = 4,
+    parameter ACC_WIDTH = 16,
+    parameter FP4_WIDTH = 4
 ) (
     input  logic        clk,
     input  logic        rst_n,
@@ -71,68 +76,60 @@ module gemm_top #(
     ///////////////////////////////////////////////////////////////////////////
     // Internal control signals (from gemm_control_unit)
     ///////////////////////////////////////////////////////////////////////////
-    logic [ARRAY_SIZE-1:0]  h_pe_en;
-    logic [ARRAY_SIZE-1:0]  v_pe_en;
-    logic [ACC_WIDTH-1:0]   bias_bus;
-    logic [ARRAY_SIZE-1:0]  ld_bias;
+    logic [ROWS-1:0]     h_pe_en;   // 1-bit scalar for ROWS=1
+    logic [COLS-1:0]     v_pe_en;   // one per column
+    logic [ACC_WIDTH-1:0] bias_bus;
+    logic [COLS-1:0]     ld_bias;   // one-hot per column
 
-    logic [ARRAY_SIZE-1:0]  quant_en;
-    logic                   relu_en;
-    logic [ACC_WIDTH-1:0]   scale;
-    logic                   col_sel;
-
-    logic [7:0]             y_out_vec;  // {y_out[1][3:0], y_out[0][3:0]}
+    logic [COLS-1:0]     quant_en;  // per-column staggered enable
+    logic                relu_en;
+    logic [ACC_WIDTH-1:0] scale;
 
     ///////////////////////////////////////////////////////////////////////////
     // Internal datapath signals
     ///////////////////////////////////////////////////////////////////////////
 
     // Systolic array inputs
-    logic [ARRAY_SIZE-1:0][ACT_WIDTH-1:0] i_col;   // activations: i_col[row]
-    logic [ARRAY_SIZE-1:0][WGT_WIDTH-1:0] w_row;   // weights:     w_row[col]
+    logic [ROWS-1:0][ACT_WIDTH-1:0] i_col;   // i_col[row] — 1 row
+    logic [COLS-1:0][WGT_WIDTH-1:0] w_row;   // w_row[col] — 3 columns
 
-    // Full accumulator output mesh: sa_out[col][row][ACC_WIDTH-1:0]
-    logic [ARRAY_SIZE-1:0][ARRAY_SIZE-1:0][ACC_WIDTH-1:0] sa_out;
+    // Accumulator outputs: 1D (ROWS=1, one acc per column)
+    logic [COLS-1:0][ACC_WIDTH-1:0] sa_out;
 
-    // Column-selected output feeding vector unit (no pipeline flop)
-    logic [ARRAY_SIZE-1:0][ACC_WIDTH-1:0] col_out;
+    // col_out: direct wiring from sa_out (no mux; sa_out already 1D)
+    logic [COLS-1:0][ACC_WIDTH-1:0] col_out;
 
-    // Vector unit FP4 results: y_out[lane][FP4_WIDTH-1:0]
-    logic [ARRAY_SIZE-1:0][FP4_WIDTH-1:0] y_out;
+    // Vector unit FP4 results: y_out[col][FP4_WIDTH-1:0]
+    logic [COLS-1:0][FP4_WIDTH-1:0] y_out;
 
     ///////////////////////////////////////////////////////////////////////////
     // Activation and weight routing from input pins
     //
-    // During STREAM:  ui_in[3:0]=a_row0, ui_in[7:4]=a_row1
-    //                 uio_in[3:0]=w_col0, uio_in[7:4]=w_col1
-    // During non-STREAM phases: PE enables are 0 so data is gated; pins carry
-    // config/bias/scale and these assignments are harmless don't-cares.
+    // 1x3 mapping (during STREAM):
+    //   ui_in[3:0]  -> a_row0 (single activation row)
+    //   ui_in[7:4]  -> w_col0 (weight col 0)
+    //   uio_in[3:0] -> w_col1 (weight col 1)
+    //   uio_in[7:4] -> w_col2 (weight col 2)
+    //
+    // During non-STREAM phases: PE enables are 0, pins carry config/bias/scale.
+    // These assignments are harmless don't-cares when PE enables are low.
     ///////////////////////////////////////////////////////////////////////////
     assign i_col[0] = ui_in[3:0];
-    assign i_col[1] = ui_in[7:4];
-    assign w_row[0] = uio_in[3:0];
-    assign w_row[1] = uio_in[7:4];
+    assign w_row[0] = ui_in[7:4];
+    assign w_row[1] = uio_in[3:0];
+    assign w_row[2] = uio_in[7:4];
 
     ///////////////////////////////////////////////////////////////////////////
-    // Column mux: select one column of accumulators to feed vector unit.
-    // col_sel driven by control unit:
-    //   0 -> col 0 (STREAM last cycle, quant_col0)
-    //   1 -> col 1 (DRAIN cnt=0,       quant_col1)
-    // sa_out[col][row] is col-major; direct index by col_sel.
-    // No pipeline register (original gemm_top col_out_pipe removed).
+    // col_out: direct wiring from sa_out
+    // No column mux needed; sa_out[j] is the single accumulator for column j
+    // (ROWS=1, no row index required).
     ///////////////////////////////////////////////////////////////////////////
-    genvar row;
+    genvar j;
     generate
-        for (row = 0; row < ARRAY_SIZE; row++) begin : col_mux_gen
-            assign col_out[row] = col_sel ? sa_out[1][row] : sa_out[0][row];
+        for (j = 0; j < COLS; j++) begin : col_wire_gen
+            assign col_out[j] = sa_out[j];
         end
     endgenerate
-
-    ///////////////////////////////////////////////////////////////////////////
-    // Pack vector unit y_out for control unit result bus
-    // uio_out[3:0] = row 0 result (lane 0), uio_out[7:4] = row 1 (lane 1)
-    ///////////////////////////////////////////////////////////////////////////
-    assign y_out_vec = {y_out[1], y_out[0]};
 
     ///////////////////////////////////////////////////////////////////////////
     // Control unit
@@ -142,7 +139,7 @@ module gemm_top #(
         .rst_n      (rst_n),
         .ui_in      (ui_in),
         .uio_in     (uio_in),
-        .y_out_vec  (y_out_vec),
+        .y_out_vec  (y_out),    // [COLS-1:0][FP4_WIDTH-1:0] — direct from VU
 
         .H_PE_EN    (h_pe_en),
         .V_PE_EN    (v_pe_en),
@@ -152,7 +149,7 @@ module gemm_top #(
         .quant_en   (quant_en),
         .relu_en    (relu_en),
         .scale      (scale),
-        .col_sel    (col_sel),
+        // col_sel removed — no column mux in 1xN design
 
         .uio_out    (uio_out),
         .uio_oe     (uio_oe),
@@ -160,7 +157,7 @@ module gemm_top #(
     );
 
     ///////////////////////////////////////////////////////////////////////////
-    // Systolic array (2x2)
+    // Systolic array (1xN, ROWS=1, COLS=3)
     ///////////////////////////////////////////////////////////////////////////
     gemm_systolic_array u_sa (
         .clk        (clk),
@@ -174,8 +171,8 @@ module gemm_top #(
     );
 
     ///////////////////////////////////////////////////////////////////////////
-    // Vector unit (2 lanes, one FP16->FP4 quantizer per row)
-    // col_out feeds directly from the col mux (no pipeline flop).
+    // Vector unit (COLS=3 lanes, one FP16->FP4 quantizer per column)
+    // col_out feeds directly from sa_out (no pipeline flop).
     ///////////////////////////////////////////////////////////////////////////
     vector_unit u_vu (
         .clk        (clk),
@@ -185,4 +182,5 @@ module gemm_top #(
         .scale      (scale),
         .y_out      (y_out)
     );
+
 endmodule

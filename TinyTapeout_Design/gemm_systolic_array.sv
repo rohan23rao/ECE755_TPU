@@ -1,106 +1,109 @@
 ///////////////////////////////////////////////////////////////////////////////
 // Module: gemm_systolic_array.sv
-// Description: 2x2 Systolic Array for GEMM compute. Instantiates
-//              ARRAY_SIZE x ARRAY_SIZE gemm_pe cells and wires them
-//              into a 2D mesh with the following dataflow:
+// Description: 1xN Systolic Array for GEMM compute (Tiny Tapeout).
+//              ROWS is hardcoded to 1 at synthesis; COLS is the runtime-
+//              configurable column count (max 3, gated externally via V_PE_EN).
 //
 //              Data flow:
-//                Activations  : enter left column (col 0), flow EAST
-//                Weights      : enter top row    (row 0), flow SOUTH
-//                Enables      : same — H_PE_EN[i] enters PE[i][0].h_en_in
-//                                       V_PE_EN[j] enters PE[0][j].v_en_in
-//                               then ripple through pipeline regs diagonally
+//                Activations  : single row enters left edge (col 0), flow EAST
+//                Weights      : enter top row (row 0), flow SOUTH (1 hop only)
+//                Enables      : H_PE_EN[0] enters PE[0][0].h_en_in
+//                               V_PE_EN[j] enters PE[0][j].v_en_in
+//                               ripple east (h) / south (v) through pipeline regs
 //
 //              Bias:
-//                BIAS [ACC_WIDTH-1:0] broadcast to all PEs
-//                LD_BIAS[j] one-hot per column — loads bias into all PEs
-//                in column j simultaneously (broadcast down each column)
+//                BIAS[ACC_WIDTH-1:0] broadcast; LD_BIAS[j] one-hot per column
 //
 //              Output:
-//                SA_OUT[col][row] exposes all ACC_WIDTH accumulator outputs
-//                directly. Column mux (COL_ADDR) moved to gemm_top.
+//                sa_out[COLS-1:0][ACC_WIDTH-1:0] — 1D, one acc per column
+//                (no row index needed with ROWS=1)
 //
 // Connections:
-//   I_COL[i]   → PE[i][0].a_in   (activation row i enters left edge)
-//   W_ROW[j]   → PE[0][j].w_in   (weight col j enters top edge)
-//   H_PE_EN[i] → PE[i][0].h_en_in
-//   V_PE_EN[j] → PE[0][j].v_en_in
-//   PE[i][j].a_out   → PE[i][j+1].a_in
-//   PE[i][j].h_en_out→ PE[i][j+1].h_en_in
-//   PE[i][j].w_out   → PE[i+1][j].w_in
-//   PE[i][j].v_en_out→ PE[i+1][j].v_en_in
-//   PE[i][j].acc_out → sa_out[j][i]
+//   i_col[0]      → PE[0][0].a_in
+//   w_row[j]      → PE[0][j].w_in
+//   H_PE_EN[0]    → PE[0][0].h_en_in
+//   V_PE_EN[j]    → PE[0][j].v_en_in
+//   PE[0][j].a_out    → PE[0][j+1].a_in
+//   PE[0][j].h_en_out → PE[0][j+1].h_en_in
+//   PE[0][j].w_out    → (unused; ROWS=1, no row below)
+//   PE[0][j].v_en_out → (unused; ROWS=1)
+//   PE[0][j].acc_out  → sa_out[j]
 //
 // Author: Group5
 ///////////////////////////////////////////////////////////////////////////////
 
 module gemm_systolic_array #(
-    parameter ARRAY_SIZE      = 2,
-    parameter ACT_WIDTH       = 4,
-    parameter WGT_WIDTH       = 4,
-    parameter ACC_WIDTH       = 16
+    parameter ROWS       = 1,
+    parameter COLS       = 3,
+    parameter ACT_WIDTH  = 4,
+    parameter WGT_WIDTH  = 4,
+    parameter ACC_WIDTH  = 16
 ) (
     // Global
-    input  logic                                        clk,
+    input  logic                                clk,
 
-    // Activation inputs (one per row, enters left edge)
-    input  logic [ARRAY_SIZE-1:0][ACT_WIDTH-1:0]  i_col,   // I_COL[row]
+    // Activation inputs (one per row — ROWS=1)
+    input  logic [ROWS-1:0][ACT_WIDTH-1:0]     i_col,
 
-    // Weight inputs (one per column, enters top edge)
-    input  logic [ARRAY_SIZE-1:0][WGT_WIDTH-1:0]  w_row,   // W_ROW[col]
+    // Weight inputs (one per column)
+    input  logic [COLS-1:0][WGT_WIDTH-1:0]     w_row,
 
-    // PE enable vectors from Control Unit
-    input  logic [ARRAY_SIZE-1:0]   h_pe_en,    // horizontal enables → left col
-    input  logic [ARRAY_SIZE-1:0]   v_pe_en,    // vertical enables   → top row
+    // PE enable vectors
+    input  logic [ROWS-1:0]                     h_pe_en,   // 1-bit for ROWS=1
+    input  logic [COLS-1:0]                     v_pe_en,
 
     // Bias
-    input  logic [ACC_WIDTH-1:0]    bias,       // broadcast to all PEs
-    input  logic [ARRAY_SIZE-1:0]   ld_bias,    // one-hot per column
+    input  logic [ACC_WIDTH-1:0]                bias,
+    input  logic [COLS-1:0]                     ld_bias,   // one-hot per column
 
-    // Full accumulator output mesh: sa_out[col][row]
-    output logic [ARRAY_SIZE-1:0][ARRAY_SIZE-1:0][ACC_WIDTH-1:0] sa_out
+    // Accumulator outputs: one per column (1D since ROWS=1)
+    output logic [COLS-1:0][ACC_WIDTH-1:0]      sa_out
 );
-
 
     ///////////////////////////////////////////////////////////////////////////
     // Internal mesh wires
+    // a_mesh   : activations flow east  — [row][col_boundary]
+    // w_mesh   : weights flow south     — [row_boundary][col]
+    // h_en_mesh: h-enable flows east    — [row][col_boundary]
+    // v_en_mesh: v-enable flows south   — [row_boundary][col]
+    // acc_mesh : accumulator per PE     — [row][col]
     ///////////////////////////////////////////////////////////////////////////
-    logic [ARRAY_SIZE-1:0][ARRAY_SIZE:0][ACT_WIDTH-1:0]   a_mesh;
-    logic [ARRAY_SIZE:0][ARRAY_SIZE-1:0][WGT_WIDTH-1:0]   w_mesh;
-    logic [ARRAY_SIZE-1:0][ARRAY_SIZE:0]                   h_en_mesh;
-    logic [ARRAY_SIZE:0][ARRAY_SIZE-1:0]                   v_en_mesh;
-    logic [ARRAY_SIZE-1:0][ARRAY_SIZE-1:0][ACC_WIDTH-1:0]  acc_mesh;
+    logic [ROWS-1:0][COLS:0][ACT_WIDTH-1:0]    a_mesh;
+    logic [ROWS:0][COLS-1:0][WGT_WIDTH-1:0]    w_mesh;
+    logic [ROWS-1:0][COLS:0]                    h_en_mesh;
+    logic [ROWS:0][COLS-1:0]                    v_en_mesh;
+    logic [ROWS-1:0][COLS-1:0][ACC_WIDTH-1:0]  acc_mesh;
 
     ///////////////////////////////////////////////////////////////////////////
     // Boundary connections
     ///////////////////////////////////////////////////////////////////////////
     genvar i, j;
     generate
-        for (i = 0; i < ARRAY_SIZE; i++) begin : boundary_h
+        for (i = 0; i < ROWS; i++) begin : boundary_h
             assign a_mesh[i][0]    = i_col[i];
             assign h_en_mesh[i][0] = h_pe_en[i];
         end
 
-        for (j = 0; j < ARRAY_SIZE; j++) begin : boundary_v
+        for (j = 0; j < COLS; j++) begin : boundary_v
             assign w_mesh[0][j]    = w_row[j];
             assign v_en_mesh[0][j] = v_pe_en[j];
         end
     endgenerate
 
-    // Bias demux: avoid broadcast fanout across all PEs
-    logic [ARRAY_SIZE-1:0][ACC_WIDTH-1:0] bias_col;
+    // Bias demux — one entry per column
+    logic [COLS-1:0][ACC_WIDTH-1:0] bias_col;
     generate
-        for (j = 0; j < ARRAY_SIZE; j++) begin : bias_demux
+        for (j = 0; j < COLS; j++) begin : bias_demux
             assign bias_col[j] = ld_bias[j] ? bias : '0;
         end
     endgenerate
 
     ///////////////////////////////////////////////////////////////////////////
-    // PE grid instantiation
+    // PE grid — ROWS x COLS (1x3 for Tiny Tapeout target)
     ///////////////////////////////////////////////////////////////////////////
     generate
-        for (i = 0; i < ARRAY_SIZE; i++) begin : row_gen
-            for (j = 0; j < ARRAY_SIZE; j++) begin : col_gen
+        for (i = 0; i < ROWS; i++) begin : row_gen
+            for (j = 0; j < COLS; j++) begin : col_gen
                 gemm_pe pe_inst (
                     .clk      (clk),
 
@@ -124,15 +127,13 @@ module gemm_systolic_array #(
     endgenerate
 
     ///////////////////////////////////////////////////////////////////////////
-    // Output: expose full accumulator mesh
-    // sa_out[j][i] = acc_mesh[i][j]  (col-major for South pin alignment)
-    // Flat bit index: sa_out[j*128 + i*16 +: 16] = col j, row i
+    // Output: sa_out[j] = acc_mesh[0][j]
+    // 1D — no row index needed with ROWS=1
     ///////////////////////////////////////////////////////////////////////////
     generate
-        for (i = 0; i < ARRAY_SIZE; i++) begin : row_out_gen
-            for (j = 0; j < ARRAY_SIZE; j++) begin : col_out_gen
-                assign sa_out[j][i] = acc_mesh[i][j];
-            end
+        for (j = 0; j < COLS; j++) begin : col_out_gen
+            assign sa_out[j] = acc_mesh[0][j];
         end
     endgenerate
+
 endmodule
