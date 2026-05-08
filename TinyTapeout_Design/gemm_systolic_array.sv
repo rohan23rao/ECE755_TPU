@@ -127,5 +127,4 @@ module gemm_systolic_array #(
             assign sa_out[j] = acc_mesh[0][j];
         end
     endgenerate
-
 endmodule

@@ -4,28 +4,33 @@
 //
 // Pin mapping:
 //   ui_in[7:0]:
-//     [0]    START pulse                              IDLE
-//     [7:0]  K_LEN[7:0]                              CFG
-//     [7:0]  bias/scale upper byte {FP16[15:8]}      LOAD
-//     [3:0]  a_row0  (FP4 activation)                STREAM
-//     [7:4]  w_col0  (FP4 weight, col 0)             STREAM
+//     [0]    TILE_START pulse                             IDLE
+//     [7:0]  K_LEN[7:0]                                  CFG
+//     [7:0]  bias upper byte {FP16[15:8]}                LOAD
+//     [3:0]  a_row0  (FP4 activation)                    STREAM
+//     [7:4]  w_col0  (FP4 weight, col 0)                 STREAM
+//     [7:0]  scale upper byte {FP16[15:8]}               DRAIN SCALE_LOAD
+//     [0]    Y_ACK                                       DRAIN RESULT_HOLD
 //
 //   uio[7:0] bidirectional:
-//     Input (uio_oe=0x00) during IDLE/CFG/LOAD/STREAM:
-//       CFG    : [0]=RELU_EN, [1]=SKIP_BIAS, [2]=SKIP_SCALE, [4:3]=COL_CONFIG
-//       LOAD   : [7:0] bias/scale lower byte {FP16[7:0]}
-//       STREAM : [3:0]=w_col1
-//     Output (uio_oe=0xFF) during DRAIN:
-//       drain_cnt=0: [3:0]=y[0], [7:4]=0
-//       drain_cnt=1: [3:0]=y[0], [7:4]=y[1]
+//     Input (uio_oe=0x00) during IDLE/CFG/LOAD/STREAM/SCALE_LOAD:
+//       CFG        : [0]=RELU_EN, [1]=SKIP_BIAS, [4:3]=COL_CONFIG
+//       LOAD       : [7:0] bias lower byte {FP16[7:0]}
+//       STREAM     : [3:0]=w_col1
+//       SCALE_LOAD : [7:0] scale lower byte {FP16[7:0]}
+//     Output (uio_oe=0xFF) during DRAIN RESULT_HOLD:
+//       [3:0]=y_out (FP4 result for current column), [7:4]=0
 //
 //   uo_out[7:0] always output:
-//     [2:0]  FSM state (IDLE=0,CFG=1,LOAD=2,STREAM=3,DRAIN=4)
+//     [2:0]  FSM state (IDLE=0, CFG=1, LOAD=2, STREAM=3, DRAIN=4)
 //     [3]    busy
 //     [4]    drain_active
-//     [5]    drain_active && drain_cnt
+//     [5]    drain_phase  (0=SCALE_LOAD, 1=RESULT_HOLD)
 //     [6]    tile_done
-//     [7]    0
+//     [7]    drain_col
+//     → IDLE=0x00, CFG=0x09, LOAD=0x0A, STREAM=0x0B,
+//       scale_col0=0x1C, result_col0=0x3C,
+//       scale_col1=0x9C, result_col1=0xBC, tile_done=0xFC
 //
 // Author: Group5
 ///////////////////////////////////////////////////////////////////////////////
@@ -56,27 +61,28 @@ module gemm_top #(
     ///////////////////////////////////////////////////////////////////////////
     // Internal wires
     ///////////////////////////////////////////////////////////////////////////
-    logic [ROWS-1:0]      h_pe_en;
-    logic [COLS-1:0]      v_pe_en;
-    logic [ACC_WIDTH-1:0] bias_bus;
-    logic [COLS-1:0]      ld_bias;
+    logic [ROWS-1:0]       h_pe_en;
+    logic [COLS-1:0]       v_pe_en;
+    logic [ACC_WIDTH-1:0]  bias_bus;
+    logic [COLS-1:0]       ld_bias;
 
-    logic [COLS-1:0]                  quant_en;
-    logic                             relu_en;
-    logic [ACC_WIDTH-1:0]             scale;
+    logic                  quant_en;       // 1-bit: fires once per SCALE_LOAD
+    logic                  relu_en;
+    logic [ACC_WIDTH-1:0]  scale;          // bypass from {ui_in, uio_in} in CU
+    logic                  col_sel;        // drain_col: selects which SA column → VU
 
-    logic [ROWS-1:0][ACT_WIDTH-1:0]  i_col;
-    logic [COLS-1:0][WGT_WIDTH-1:0]  w_row;
-    logic [COLS-1:0][ACC_WIDTH-1:0]  sa_out;
+    logic [ROWS-1:0][ACT_WIDTH-1:0]   i_col;
+    logic [COLS-1:0][WGT_WIDTH-1:0]   w_row;
+    logic [COLS-1:0][ACC_WIDTH-1:0]   sa_out;
 
-    logic [COLS-1:0][FP4_WIDTH-1:0]  y_out_vec;
+    logic [ACC_WIDTH-1:0]  col_out_to_vu; // single-column accumulator to VU
+    logic [FP4_WIDTH-1:0]  y_out;         // single-lane FP4 result from VU
 
     ///////////////////////////////////////////////////////////////////////////
     // Input routing
-    // i_col[0]  : activation (same for all columns — 1 row)
-    // w_row[0]  : weight for col 0
-    // w_row[1]  : weight for col 1
-    // (col 2 removed)
+    //   i_col[0]  : activation row 0 (same value feeds all columns — 1 row)
+    //   w_row[0]  : weight for col 0
+    //   w_row[1]  : weight for col 1
     ///////////////////////////////////////////////////////////////////////////
     assign i_col[0] = ui_in[3:0];
     assign w_row[0] = ui_in[7:4];
@@ -90,7 +96,7 @@ module gemm_top #(
         .rst_n      (rst_n),
         .ui_in      (ui_in),
         .uio_in     (uio_in),
-        .y_out_vec  (y_out_vec),
+        .y_out      (y_out),
 
         .H_PE_EN    (h_pe_en),
         .V_PE_EN    (v_pe_en),
@@ -100,6 +106,7 @@ module gemm_top #(
         .quant_en   (quant_en),
         .relu_en    (relu_en),
         .scale      (scale),
+        .col_sel    (col_sel),
 
         .uio_out    (uio_out),
         .uio_oe     (uio_oe),
@@ -121,17 +128,25 @@ module gemm_top #(
     );
 
     ///////////////////////////////////////////////////////////////////////////
-    // Vector unit (2 lanes)
-    // sa_out feeds directly — no SA-to-VU pipeline register.
-    // scale and quant_en come from CU (CU muxes correct column's scale).
+    // Column select mux
+    //   Routes one column's accumulator to the single-lane VU.
+    //   col_sel = drain_col; driven by CU during DRAIN.
+    //   sa_out[col_sel] is valid for both columns by the time DRAIN starts.
+    ///////////////////////////////////////////////////////////////////////////
+    assign col_out_to_vu = sa_out[col_sel];
+
+    ///////////////////////////////////////////////////////////////////////////
+    // Vector unit (single lane)
+    //   No SA-to-VU pipeline register — sa_out is directly valid at DRAIN entry.
+    //   scale bypassed from {ui_in, uio_in} during SCALE_LOAD (no scale_reg).
     ///////////////////////////////////////////////////////////////////////////
     vector_unit u_vu (
         .clk        (clk),
         .relu_en    (relu_en),
         .quant_en   (quant_en),
-        .col_out    (sa_out),
+        .col_out    (col_out_to_vu),
         .scale      (scale),
-        .y_out      (y_out_vec)
+        .y_out      (y_out)
     );
 
 endmodule
