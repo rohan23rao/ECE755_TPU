@@ -1,24 +1,18 @@
 ///////////////////////////////////////////////////////////////////////////////
 // Module: gemm_pe.sv
-// Description: Fully pipelined MAC Processing Element for GEMM Systolic Array.
+// Description: MAC Processing Element — 1-stage, 1x2 hardcoded.
 //
-//              Pipeline structure (1 stage):
-//                1-Stage: A_IN/W_IN → AND gate → FP4 Mul → FP16 Add → [ACC flop]
+//   pe_en is pre-computed in the CU and passed directly; h_en/v_en
+//   propagation registers are removed (they were redundant: PE[0][0].pe_en
+//   = pe_en_0 and PE[0][1].pe_en = pe_en_1, both already computed in CU).
+//   w_out and v_en_out are removed (ROWS=1, no PE below).
 //
-//              Enable propagation (single stage — 1 cycle per hop):
-//                H_EN_IN → [EAST flop] → H_EN_OUT
-//                V_EN_IN → [SOUTH flop] → V_EN_OUT
-//                1-cycle forwarding ensures h_en and v_en arrive simultaneously
-//                at PE[i][j] at cycle i+j (i hops horizontal + j hops vertical)
+//   a_out: east activation propagation for col1 stagger.
+//     CE = data_vld: freezes on stall so col1 sees the correct held
+//     activation when valid resumes.
 //
-//              Bias load (single cycle — LOAD_FIFO only, before compute):
-//                LD_BIAS directly loads BIAS into accumulator, no pipeline needed
-//                Mutually exclusive with pe_en_q (different FSM states)
-//
-//              Gating:
-//                pe_en  gates multiplier inputs  → no switching when inactive
-//                H_EN_IN gates A_OUT data        → no forwarding if row inactive
-//                V_EN_IN gates W_OUT data        → no forwarding if col inactive
+//   data_vld = 0: a_out holds last value; pe_en forced 0 by CU-side gating;
+//                 accumulator never fires.
 //
 // Author: Group5
 ///////////////////////////////////////////////////////////////////////////////
@@ -28,45 +22,27 @@ module gemm_pe #(
     parameter WGT_WIDTH = 4,
     parameter ACC_WIDTH = 16
 ) (
-    // Global
     input  logic                    clk,
 
-    // ── Horizontal inputs (from west) ─────────────────────────────────────
-    input  logic [ACT_WIDTH-1:0]    a_in,       // activation data from west
-    input  logic                    h_en_in,    // horizontal enable from west
+    input  logic [ACT_WIDTH-1:0]    a_in,
+    input  logic [WGT_WIDTH-1:0]    w_in,
+    input  logic [ACC_WIDTH-1:0]    bias,
+    input  logic                    ld_bias,
 
-    // ── Vertical inputs (from north) ──────────────────────────────────────
-    input  logic [WGT_WIDTH-1:0]    w_in,       // weight data from north
-    input  logic                    v_en_in,    // vertical enable from north
+    // Pre-computed enable from CU — no local h_en & v_en AND gate needed
+    input  logic                    pe_en,
 
-    // ── Bias load (single cycle, LOAD_FIFO only) ──────────────────────────
-    input  logic [ACC_WIDTH-1:0]    bias,       // FP16 bias value
-    input  logic                    ld_bias,    // load bias into accumulator
+    // Pipeline freeze: when 0, a_out holds and accumulator does not fire
+    input  logic                    data_vld,
 
-    // ── Horizontal outputs (to east) ──────────────────────────────────────
-    output logic [ACT_WIDTH-1:0]    a_out,      // activation data to east
-    output logic                    h_en_out,   // horizontal enable to east
+    // East activation propagation (feeds col+1 with 1-cycle stagger)
+    output logic [ACT_WIDTH-1:0]    a_out,
 
-    // ── Vertical outputs (to south) ───────────────────────────────────────
-    output logic [WGT_WIDTH-1:0]    w_out,      // weight data to south
-    output logic                    v_en_out,   // vertical enable to south
-
-    // ── Accumulator output ────────────────────────────────────────────────
     output logic [ACC_WIDTH-1:0]    acc_out
 );
 
-
-    ///////////////////////////////////////////////////////////////////////////
-    // PE enable — combinational
-    // PE[i][j] activates at cycle i+j as enables ripple through single-stage
-    // pipeline registers (1 cycle per hop east/south)
-    ///////////////////////////////////////////////////////////////////////////
-    logic pe_en;
-    assign pe_en = h_en_in & v_en_in;
-
     ///////////////////////////////////////////////////////////////////////////
     // Gated multiplier inputs
-    // Zero when PE inactive — suppresses switching in FP4 multiplier
     ///////////////////////////////////////////////////////////////////////////
     logic [ACT_WIDTH-1:0] a_gated;
     logic [WGT_WIDTH-1:0] w_gated;
@@ -85,7 +61,6 @@ module gemm_pe #(
         .Out (mult_out)
     );
 
-
     ///////////////////////////////////////////////////////////////////////////
     // FP16 Adder
     ///////////////////////////////////////////////////////////////////////////
@@ -99,41 +74,23 @@ module gemm_pe #(
     );
 
     ///////////////////////////////////////////////////////////////////////////
-    // Accumulator register
-    //
-    // Priority: ld_bias > pe_en_q > hold
-    //   ld_bias  : single-cycle direct load — LOAD_FIFO only, before compute
-    //   pe_en  : accumulate pipelined result — 1cy after pe_en
-    //   hold     : inactive PE never corrupts accumulator
+    // Accumulator  (ld_bias > pe_en > hold)
     ///////////////////////////////////////////////////////////////////////////
     always_ff @(posedge clk) begin
-		if (ld_bias) begin
-			acc_q <= bias;
-		end
-        else if (pe_en) begin
-			acc_q <= add_result;
-		end
+        if      (ld_bias) acc_q <= bias;
+        else if (pe_en)   acc_q <= add_result;
     end
 
     assign acc_out = acc_q;
 
     ///////////////////////////////////////////////////////////////////////////
-    // EAST pipeline register — single stage
-    // h_en_out : unconditional — enable always propagates east
-    // a_out    : gated by H_EN_IN — no forwarding if row inactive
+    // East activation propagation — clock-enabled by data_vld
+    //   Freeze on stall: a_out holds A[k] so col1 receives the correct
+    //   staggered activation on the next valid cycle.
     ///////////////////////////////////////////////////////////////////////////
     always_ff @(posedge clk) begin
-		h_en_out <= h_en_in;
-		a_out <= h_en_in ? a_in : '0;
+        if (data_vld)
+            a_out <= pe_en ? a_in : '0;
     end
 
-    ///////////////////////////////////////////////////////////////////////////
-    // SOUTH pipeline register — single stage
-    // v_en_out : unconditional — enable always propagates south
-    // w_out    : gated by V_EN_IN — no forwarding if col inactive
-    ///////////////////////////////////////////////////////////////////////////
-    always_ff @(posedge clk) begin
-		v_en_out <= v_en_in;
-		w_out <= v_en_in ? w_in : '0;
-    end
 endmodule

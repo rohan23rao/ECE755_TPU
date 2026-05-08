@@ -1,38 +1,43 @@
 ///////////////////////////////////////////////////////////////////////////////
 // Module: gemm_fsm.sv
-// Description: Streaming FSM for the FP4 GEMM Tiny Tapeout (1x2) design.
+// Description: Streaming FSM — FP4 GEMM Tiny Tapeout, hardcoded 1x2.
 //
 //   States: IDLE → CFG → [LOAD] → STREAM → DRAIN → IDLE
 //
-//   SKIP_BIAS (uio_in[1] during CFG): CFG exits directly to STREAM, LOAD skipped.
+//   Hardcoded 1x2 simplifications vs. prior version:
+//     - COL_CONFIG removed; LOAD always 2 cycles (load_cnt 0,1).
+//     - stream_exit = K_LEN_r (was K + COL_CONFIG - 1; with COL_CONFIG=1
+//       this is K + 0 = K). Eliminates the 9-bit adder entirely.
+//     - K_LEN_r: 8→4 bits (max K=15).
+//     - stream_cnt: 9→4 bits (max 15).
 //
-//   LOAD (bias-only, 2 cycles for 1x2):
-//     cnt=0: bias[col0] loaded by CU
-//     cnt=1: bias[col1] loaded by CU
-//     Exit:  load_cnt == COL_CONFIG_r  (=1 for 1x2)
+//   SKIP_BIAS (uio_in[1] in CFG): jump CFG→STREAM, skip LOAD.
 //
-//   STREAM: K + COL_CONFIG cycles (K+1 for 1x2, cnt 0..K).
-//     pe_en_0 active cnt 0..K-1; pe_en_1 (registered) active cnt 1..K.
+//   LOAD (2 cycles, bias only):
+//     cnt=0: CU fires ld_bias[0].   cnt=1: CU fires ld_bias[1].
+//     Exit on load_cnt == 1.
 //
-//   DRAIN: per-column 2-phase handshake, repeated for col0 then col1.
-//     drain_phase=0  SCALE_LOAD  (1 cycle, unconditional advance):
-//       CU asserts scale = {ui_in,uio_in}; quant_en fires; uio_oe=0x00.
-//     drain_phase=1  RESULT_HOLD (stall until Y_ACK = ui_in[0]):
-//       CU drives y_out on uio_out[3:0]; uio_oe=0xFF.
-//       On ACK: if col0 → move to col1 SCALE_LOAD.
-//                if col1 → tile_done, return to IDLE.
+//   STREAM (K+1 valid cycles, 0..K):
+//     pe_en_0 active on cnt 0..K-1 (K MACs for col0).
+//     pe_en_1 (registered pe_en_0) active on cnt 1..K (col1 stagger).
+//     Tail cycle cnt=K: pe_en_0=0, pe_en_1=1 (col1 last MAC).
+//     DATA_VLD (uio_in[5]): stream_cnt and stream exit gated — stall until
+//     host presents valid data; stream_exit also requires DATA_VLD so the
+//     tail MAC always fires on a live cycle.
 //
-// uo_out encoding (from CU):
-//   [2:0]=state, [3]=busy, [4]=drain_active, [5]=drain_phase, [6]=tile_done, [7]=drain_col
-//   → IDLE=0x00, CFG=0x09, LOAD=0x0A, STREAM=0x0B,
-//     scale_col0=0x1C, result_col0=0x3C,
-//     scale_col1=0x9C, result_col1=0xBC, tile_done=0xFC
+//   DRAIN: 2-phase per-column handshake × 2 columns.
+//     phase=0 SCALE_LOAD (1 cycle unconditional).
+//     phase=1 RESULT_HOLD (stall until Y_ACK = ui_in[0]).
 //
-// CFG pin capture:
-//   ui_in[7:0]  = K_LEN
+// CFG captures (ui_in / uio_in):
+//   ui_in[3:0]  = K_LEN   (max K=15; upper nibble ignored)
 //   uio_in[0]   = RELU_EN
 //   uio_in[1]   = SKIP_BIAS
-//   uio_in[4:3] = COL_CONFIG[1:0]
+//   (uio_in[4:3] was COL_CONFIG — now free)
+//
+// STREAM pin usage:
+//   ui_in[3:0]  = a_row0    uio_in[3:0] = w_col1
+//   ui_in[7:4]  = w_col0    uio_in[5]   = DATA_VLD
 //
 // Author: Group5
 ///////////////////////////////////////////////////////////////////////////////
@@ -44,20 +49,16 @@ module gemm_fsm (
     input  logic [7:0]  ui_in,
     input  logic [7:0]  uio_in,
 
-    // State / counter outputs
     output logic [2:0]  state_out,
-    output logic [0:0]  load_cnt,      // 1-bit: counts bias slots 0..COL_CONFIG_r
-    output logic [8:0]  stream_cnt,
-    output logic        drain_col,     // 0 = col0, 1 = col1
-    output logic        drain_phase,   // 0 = SCALE_LOAD, 1 = RESULT_HOLD
+    output logic [0:0]  load_cnt,     // 1-bit: 0=col0 bias, 1=col1 bias
+    output logic [3:0]  stream_cnt,   // 4-bit: 0..K (max 15)
+    output logic        drain_col,
+    output logic        drain_phase,
 
-    // Config registers
-    output logic [7:0]  K_LEN_r,
-    output logic [1:0]  COL_CONFIG_r,
+    output logic [3:0]  K_LEN_r,      // 4-bit captured K
     output logic        RELU_EN_r,
     output logic        SKIP_BIAS_r,
 
-    // State flags
     output logic        load_active,
     output logic        stream_active,
     output logic        drain_active,
@@ -76,62 +77,55 @@ module gemm_fsm (
     state_t state, next_state;
 
     logic [0:0] load_cnt_r;
-    logic [8:0] stream_cnt_r;
+    logic [3:0] stream_cnt_r;
     logic       drain_col_r;
     logic       drain_phase_r;
 
-    logic [7:0] K_LEN_r_int;
-    logic [1:0] COL_CONFIG_r_int;
+    logic [3:0] K_LEN_r_int;
     logic       RELU_EN_r_int;
     logic       SKIP_BIAS_r_int;
 
-    // STREAM exit: stream_cnt == K + COL_CONFIG - 1
-    //   1x2 (COL_CONFIG=1): exits at cnt == K; total K+1 cycles (0..K)
-    logic [8:0] stream_exit;
-    assign stream_exit = {1'b0, K_LEN_r_int} + {7'b0, COL_CONFIG_r_int} - 9'd1;
+    // stream_exit = K_LEN_r (hardcoded 1x2: K + 1 - 1 = K — no adder)
+    wire [3:0] stream_exit = K_LEN_r_int;
 
-    logic y_ack;
-    assign y_ack = ui_in[0];
+    // DATA_VLD: only meaningful in STREAM; gates counter advance and exit
+    wire data_vld = uio_in[5];
+    wire y_ack    = ui_in[0];
 
     ///////////////////////////////////////////////////////////////////////////
     // State register
     ///////////////////////////////////////////////////////////////////////////
     always_ff @(posedge clk, negedge rst_n) begin
-        if (!rst_n) begin
-			state <= IDLE;
-		end
-        else begin
-			state <= next_state;
-		end
+        if (!rst_n) state <= IDLE;
+        else        state <= next_state;
     end
 
     ///////////////////////////////////////////////////////////////////////////
-    // Config capture — latched on the CFG cycle posedge
+    // Config capture
     ///////////////////////////////////////////////////////////////////////////
     always_ff @(posedge clk) begin
         if (state == CFG) begin
-            K_LEN_r_int      <= ui_in[7:0];
-            RELU_EN_r_int    <= uio_in[0];
-            SKIP_BIAS_r_int  <= uio_in[1];
-            COL_CONFIG_r_int <= uio_in[4:3];
+            K_LEN_r_int     <= ui_in[3:0];   // 4-bit K, max 15
+            RELU_EN_r_int   <= uio_in[0];
+            SKIP_BIAS_r_int <= uio_in[1];
+            // uio_in[4:3] (was COL_CONFIG) — now unused
         end
     end
 
     ///////////////////////////////////////////////////////////////////////////
-    // Counter / DRAIN sub-state logic
+    // Counters / DRAIN sub-state
     ///////////////////////////////////////////////////////////////////////////
     always_ff @(posedge clk, negedge rst_n) begin
         if (!rst_n) begin
             load_cnt_r    <= 1'b0;
-            stream_cnt_r  <= 9'd0;
+            stream_cnt_r  <= 4'd0;
             drain_col_r   <= 1'b0;
             drain_phase_r <= 1'b0;
-        end 
-		else begin
+        end else begin
             case (state)
                 CFG: begin
                     load_cnt_r    <= 1'b0;
-                    stream_cnt_r  <= 9'd0;
+                    stream_cnt_r  <= 4'd0;
                     drain_col_r   <= 1'b0;
                     drain_phase_r <= 1'b0;
                 end
@@ -141,30 +135,26 @@ module gemm_fsm (
                 end
 
                 STREAM: begin
-                    stream_cnt_r <= stream_cnt_r + 9'd1;
+                    if (data_vld)
+                        stream_cnt_r <= stream_cnt_r + 4'd1;
                 end
 
                 DRAIN: begin
                     if (!drain_phase_r) begin
-                        // SCALE_LOAD: always advance to RESULT_HOLD next cycle
                         drain_phase_r <= 1'b1;
-                    end
-					else begin
-                        // RESULT_HOLD: stall until host ACKs
+                    end else begin
                         if (y_ack) begin
                             if (!drain_col_r) begin
-                                // col0 done — move to col1 SCALE_LOAD
                                 drain_col_r   <= 1'b1;
                                 drain_phase_r <= 1'b0;
                             end
-                            // col1 ACK: tile_done, FSM → IDLE (no register update needed)
                         end
                     end
                 end
 
                 default: begin
                     load_cnt_r    <= 1'b0;
-                    stream_cnt_r  <= 9'd0;
+                    stream_cnt_r  <= 4'd0;
                     drain_col_r   <= 1'b0;
                     drain_phase_r <= 1'b0;
                 end
@@ -178,44 +168,28 @@ module gemm_fsm (
     always_comb begin
         next_state = state;
         case (state)
-            // ui_in[0] doubles as TILE_START in IDLE (Y_ACK only meaningful in DRAIN)
-            IDLE: begin
-				if (ui_in[0]) begin
-                    next_state = CFG;
-				end
-			end
+            IDLE:   if (ui_in[0])
+                        next_state = CFG;
 
-            // Use raw uio_in[1] — SKIP_BIAS_r_int not yet updated at this posedge
-            CFG: begin
-				next_state = uio_in[1] ? STREAM : LOAD;
-			end
+            CFG:    next_state = uio_in[1] ? STREAM : LOAD;
 
-            LOAD: begin
-				if (load_cnt_r == {1'b0, COL_CONFIG_r_int}) begin
-                    next_state = STREAM;
-				end
-			end
+            // LOAD: 2 cycles hardcoded (load_cnt 0 then 1)
+            LOAD:   if (load_cnt_r == 1'b1)
+                        next_state = STREAM;
 
-            STREAM: begin
-				if (stream_cnt_r == stream_exit) begin
-                    next_state = DRAIN;
-				end
-			end
+            // Exit requires data_vld: tail MAC for col1 always fires live
+            STREAM: if (stream_cnt_r == stream_exit && data_vld)
+                        next_state = DRAIN;
 
-            DRAIN: begin
-				if (drain_phase_r && drain_col_r && y_ack) begin
-                    next_state = IDLE;
-				end
-			end
+            DRAIN:  if (drain_phase_r && drain_col_r && y_ack)
+                        next_state = IDLE;
 
-            default: begin
-				next_state = IDLE;
-			end
+            default: next_state = IDLE;
         endcase
     end
 
     ///////////////////////////////////////////////////////////////////////////
-    // Output assignments
+    // Outputs
     ///////////////////////////////////////////////////////////////////////////
     assign state_out    = state;
     assign load_cnt     = load_cnt_r;
@@ -224,7 +198,6 @@ module gemm_fsm (
     assign drain_phase  = drain_phase_r;
 
     assign K_LEN_r      = K_LEN_r_int;
-    assign COL_CONFIG_r = COL_CONFIG_r_int;
     assign RELU_EN_r    = RELU_EN_r_int;
     assign SKIP_BIAS_r  = SKIP_BIAS_r_int;
 
@@ -232,6 +205,6 @@ module gemm_fsm (
     assign stream_active = (state == STREAM);
     assign drain_active  = (state == DRAIN);
 
-    // Fires on the last RESULT_HOLD cycle (col1, ACK received)
     assign tile_done = drain_active && drain_phase_r && drain_col_r && y_ack;
+
 endmodule
