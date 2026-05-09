@@ -35,9 +35,6 @@ module gemm_pe #(
     // Pipeline freeze: when 0, a_out holds and accumulator does not fire
     input  logic                    data_vld,
 
-    // East activation propagation (feeds col+1 with 1-cycle stagger)
-    output logic [ACT_WIDTH-1:0]    a_out,
-
     output logic [ACC_WIDTH-1:0]    acc_out
 );
 
@@ -82,15 +79,4 @@ module gemm_pe #(
     end
 
     assign acc_out = acc_q;
-
-    ///////////////////////////////////////////////////////////////////////////
-    // East activation propagation — clock-enabled by data_vld
-    //   Freeze on stall: a_out holds A[k] so col1 receives the correct
-    //   staggered activation on the next valid cycle.
-    ///////////////////////////////////////////////////////////////////////////
-    always_ff @(posedge clk) begin
-        if (data_vld)
-            a_out <= pe_en ? a_in : '0;
-    end
-
 endmodule

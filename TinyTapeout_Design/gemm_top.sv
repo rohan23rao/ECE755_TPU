@@ -1,138 +1,80 @@
-///////////////////////////////////////////////////////////////////////////////
-// Module: gemm_top.sv
-// Description: Tiny Tapeout wrapper — FP4 GEMM 1x2 (hardcoded).
-//
-// Pin mapping:
-//   ui_in[7:0]:
-//     [0]    TILE_START / Y_ACK (context-dependent: IDLE / DRAIN RESULT_HOLD)
-//     [3:0]  K_LEN[3:0]  (CFG; max K=15; upper nibble unused during CFG)
-//     [7:0]  bias[15:8]  (LOAD)
-//     [3:0]  a_row0      (STREAM, FP4 activation)
-//     [7:4]  w_col0      (STREAM, FP4 weight col 0)
-//     [7:0]  scale[15:8] (DRAIN SCALE_LOAD)
-//
-//   uio[7:0] bidirectional:
-//     Input (uio_oe=0x00) — IDLE/CFG/LOAD/STREAM/SCALE_LOAD:
-//       CFG        : [0]=RELU_EN, [1]=SKIP_BIAS  ([4:3] freed — was COL_CONFIG)
-//       LOAD       : [7:0] bias[7:0]
-//       STREAM     : [3:0]=w_col1, [5]=DATA_VLD
-//       SCALE_LOAD : [7:0] scale[7:0]
-//     Output (uio_oe=0xFF) — DRAIN RESULT_HOLD:
-//       [3:0]=y_out (FP4 result for current column), [7:4]=0
-//
-//   uo_out[7:0] (always output):
-//     [2:0]=state  [3]=busy  [4]=drain_active  [5]=drain_phase
-//     [6]=tile_done  [7]=drain_col
-//     IDLE=0x00 CFG=0x09 LOAD=0x0A STREAM=0x0B
-//     scale_col0=0x1C result_col0=0x3C
-//     scale_col1=0x9C result_col1=0xBC tile_done=0xFC
-//
-// Author: Group5
-///////////////////////////////////////////////////////////////////////////////
-
-module gemm_top #(
-    parameter ROWS      = 1,
-    parameter COLS      = 2,
-    parameter ACT_WIDTH = 4,
-    parameter WGT_WIDTH = 4,
-    parameter ACC_WIDTH = 16,
-    parameter FP4_WIDTH = 4
-) (
-    input  logic        clk,
-    input  logic        rst_n,
-    input  logic        ena,
-
-    input  logic [7:0]  ui_in,
-    output logic [7:0]  uo_out,
-    input  logic [7:0]  uio_in,
-    output logic [7:0]  uio_out,
-    output logic [7:0]  uio_oe
+module gemm_top (
+    input  logic [7:0] ui_in,    // Inputs
+    output logic [7:0] uo_out,   // Outputs
+    input  logic [7:0] uio_in,   // Bi-directional (as input)
+    output logic [7:0] uio_out,  // Bi-directional (as output)
+    output logic [7:0] uio_oe,   // Bi-directional (enable)
+    input  logic       ena,      // TT enable
+    input  logic       clk,
+    input  logic       rst_n
 );
+    // Internal Signals
+    logic [7:0] uart_data;
+    logic       uart_valid;
+    logic [15:0] bias_reg, scale_reg;
+    logic [15:0] acc_out;
+    logic [3:0]  y_out;
+    
+    // FSM Control Signals
+    logic pe_en, ld_bias, quant_en, relu_en, res_valid;
+    logic bias_hi_wen, bias_lo_wen, scale_hi_wen, scale_lo_wen;
+    logic [2:0] state_bits;
 
-    logic _ena_tied;
-    assign _ena_tied = ena & 1'b0;
-
-    ///////////////////////////////////////////////////////////////////////////
-    // Internal wires
-    ///////////////////////////////////////////////////////////////////////////
-    logic [COLS-1:0]       pe_en;       // pre-computed per-column enables
-    logic [ACC_WIDTH-1:0]  bias_bus;
-    logic [COLS-1:0]       ld_bias;
-
-    logic                  quant_en;
-    logic                  relu_en;
-    logic [ACC_WIDTH-1:0]  scale;
-    logic                  col_sel;
-    logic                  data_vld;
-
-    logic [ROWS-1:0][ACT_WIDTH-1:0]   i_col;
-    logic [COLS-1:0][WGT_WIDTH-1:0]   w_row;
-    logic [COLS-1:0][ACC_WIDTH-1:0]   sa_out;
-
-    logic [ACC_WIDTH-1:0]  col_out_to_vu;
-    logic [FP4_WIDTH-1:0]  y_out;
-
-    ///////////////////////////////////////////////////////////////////////////
-    // Input routing
-    ///////////////////////////////////////////////////////////////////////////
-    assign i_col[0] = ui_in[3:0];
-    assign w_row[0] = ui_in[7:4];
-    assign w_row[1] = uio_in[3:0];
-
-    ///////////////////////////////////////////////////////////////////////////
-    // Control unit
-    ///////////////////////////////////////////////////////////////////////////
-    gemm_control_unit u_ctrl (
-        .clk        (clk),
-        .rst_n      (rst_n),
-        .ui_in      (ui_in),
-        .uio_in     (uio_in),
-        .y_out      (y_out),
-
-        .PE_EN      (pe_en),
-        .bias_bus   (bias_bus),
-        .ld_bias    (ld_bias),
-
-        .quant_en   (quant_en),
-        .relu_en    (relu_en),
-        .scale      (scale),
-        .col_sel    (col_sel),
-        .data_vld   (data_vld),
-
-        .uio_out    (uio_out),
-        .uio_oe     (uio_oe),
-        .uo_out     (uo_out)
+    // 1. UART Receiver
+    uart_rx #(.CLK_FREQ(25_000_000), .BAUD_RATE(115_200)) u_uart (
+        .clk(clk), .rst_n(rst_n),
+        .rx(ui_in[0]), .data_out(uart_data), .byte_ready(uart_valid)
     );
 
-    ///////////////////////////////////////////////////////////////////////////
-    // Systolic array (1x2)
-    ///////////////////////////////////////////////////////////////////////////
-    gemm_systolic_array u_sa (
-        .clk        (clk),
-        .i_col      (i_col),
-        .w_row      (w_row),
-        .pe_en      (pe_en),
-        .bias       (bias_bus),
-        .ld_bias    (ld_bias),
-        .data_vld   (data_vld),
-        .sa_out     (sa_out)
+    // 2. FSM Controller
+    tt_gemm_fsm u_fsm (
+        .clk(clk), .rst_n(rst_n),
+        .byte_valid(uart_valid),       // UART byte triggers FSM 
+        .stream_done(uio_in[1]),       // From external pin 
+        .data_byte(uart_data),         // From UART
+        .pe_en(pe_en), .ld_bias(ld_bias),
+        .quant_en(quant_en), .relu_en_out(relu_en),
+        .bias_hi_wen(bias_hi_wen), .bias_lo_wen(bias_lo_wen),
+        .scale_hi_wen(scale_hi_wen), .scale_lo_wen(scale_lo_wen),
+        .result_valid(res_valid), .state_out(state_bits)
     );
 
-    ///////////////////////////////////////////////////////////////////////////
-    // Column select mux
-    ///////////////////////////////////////////////////////////////////////////
-    assign col_out_to_vu = sa_out[col_sel];
+    // 3. Holding Registers (Bias and Scale)
+    // Captured during LOAD state
+    always_ff @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            bias_reg  <= 16'h0000;
+            scale_reg <= 16'h0000;
+        end else begin
+            if (bias_hi_wen)  bias_reg[15:8] <= uart_data;
+            if (bias_lo_wen)  bias_reg[7:0]  <= uart_data;
+            if (scale_hi_wen) scale_reg[15:8] <= uart_data;
+            if (scale_lo_wen) scale_reg[7:0]  <= uart_data;
+        end
+    end
 
-    ///////////////////////////////////////////////////////////////////////////
-    // Vector unit (single lane)
-    ///////////////////////////////////////////////////////////////////////////
+    // 4. Processing Element (MAC)
+    gemm_pe u_pe (
+        .clk(clk),
+        .a_in(uart_data[7:4]),         // A from high nibble
+        .w_in(uart_data[3:0]),         // W from low nibble
+        .bias(bias_reg), .ld_bias(ld_bias),
+        .pe_en(pe_en), .data_vld(uart_valid),
+        .acc_out(acc_out)              // FP16 output
+    );
+
+    // 5. Vector Unit (Quantizer)
     vector_unit u_vu (
-        .clk        (clk),
-        .relu_en    (relu_en),
-        .quant_en   (quant_en),
-        .col_out    (col_out_to_vu),
-        .scale      (scale),
-        .y_out      (y_out)
+        .clk(clk), .relu_en(relu_en), .quant_en(quant_en),
+        .col_out(acc_out), .scale(scale_reg), .y_out(y_out)
     );
 
+    // Pin Assignments
+    assign uo_out[3:0] = y_out;         // Result nibble
+    assign uo_out[4]   = res_valid;     // Ready flag 
+    assign uo_out[7:5] = state_bits;    // Debug state 
+
+    // Set all UIO to inputs (except those you specifically want as flags)
+    assign uio_oe  = 8'b0000_0000; 
+    assign uio_out = 8'b0000_0000;
 endmodule
