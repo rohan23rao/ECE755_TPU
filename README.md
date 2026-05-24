@@ -36,6 +36,42 @@ The throughput win is mostly from the hardened PE as the global router stops dic
 
 ---
 
+## Top-Level Specification
+
+| Parameter | Value |
+|---|---|
+| Systolic array | 8×8 output-stationary MAC PEs (64 total) |
+| Vector unit | 1×8 lanes, hardware FP4 quantization + ReLU |
+| Activation / weight format | FP4 E2M1 (1 sign, 2 exp, 1 mant) |
+| Accumulation format | FP16 IEEE 754 half precision |
+| Output format | FP4 E2M1 (quantized) |
+| Max tile size | A=8, W=8, K=8 (an 8×8×8 tile) |
+| Supported tile sizes | Any rectangular tile with A, W, K each in [1, 8] |
+| FIFO depth | 8 entries per array row and column |
+| Target clock | 14 ns (71.4 MHz constraint) |
+| Process / library | SkyWater SKY130 (sky130A, sky130_fd_sc_hd) |
+
+A tile computes `Y[A×W] = Activation[A×K] × Weight[K×W]`. Tile dimensions arrive as 4-bit metadata (`A_LEN`, `W_LEN`, `K_LEN`); the control unit derives `A_MASK` / `W_MASK` row/column masks that gate the enable vectors, so a sub-maximal tile activates a sub-rectangle of PEs and FIFOs with no reconfiguration. `K > 8` is handled by the host as a sequence of tiles — `BIAS_NEW` selects whether a tile starts a fresh accumulation or continues onto the in-place PE accumulators, and `TILE_LAST` marks the tile whose result flushes through the vector unit.
+
+---
+
+## Interface and Handshake Protocol
+
+All external channels use independent **ready/valid handshakes** — a data beat transfers on a rising clock edge only when both `*_VLD` and `*_RDY` are asserted. The channels handshake independently of one another, so the host can stream metadata, data, and bias on their own schedules.
+
+| Channel | Valid / Ready | Dir | Payload |
+|---|---|---|---|
+| Metadata | `METADATA_VLD` / `METADATA_RDY` | In | `TILE_START`, `TILE_LAST`, `BIAS_NEW`, `RELU_EN`, `A_LEN`, `W_LEN`, `K_LEN` |
+| Data | `DATA_VLD` / `DATA_RDY` | In | `A_DATA[8][4]` activations, `W_DATA[8][4]` weights |
+| Bias | `BIAS_VLD` / `BIAS_RDY` | In | `BIAS[16]` (FP16) |
+| Scale | `SCALE_VLD` / `SCALE_RDY` | In | `SCALE[16]` (FP16) |
+| Output | `Y_VLD[8]` / `Y_RDY` | Out | `Y_OUT[8][4]` quantized FP4 results |
+| Status | `TILE_DONE` (pulse) | Out | Single-cycle tile-completion strobe |
+
+Per-channel `*_RDY` doubles as natural backpressure: **Metadata** is accepted only in `IDLE`; **Data** stays ready until the `K`-th data beat; **Bias** is only ready when `BIAS_NEW` is set; **Scale** follows `Y_RDY` so scale beats arrive in lockstep with output beats; **Output** asserts `Y_VLD[8]` per lane through a 2-cycle vector-unit pipeline. `TILE_DONE` is a status strobe, not a handshake.
+
+---
+
 ## Architecture
 
 ### System-level
@@ -57,6 +93,19 @@ Inside `gemm_top.sv`:
 - **`gemm_systolic_array`** — 8×8 mesh of `gemm_pe.sv` instances. Activations flow east, weights flow south, enables ripple diagonally so `PE[i][j]` activates at cycle `i+j`.
 - **`vector_unit`** — 8 lanes of `FloatP16x4`, sharing a single `SCALE` value broadcast across the row.
 
+### Control flow
+
+Control is **centralized, not a global pipeline** — `gemm_fsm` plus its datapath wrapper `gemm_control_unit` sequence the entire core through three discrete phases per tile (load, compute, flush), running to completion in order. Within a tile the systolic array is pipelined as data ripples through the mesh, but tile-level scheduling is sequential.
+
+| State | Action | Cycles in state |
+|---|---|---|
+| `IDLE` | Wait for `TILE_START && METADATA_VLD`. Latch metadata, derive masks. | 1 (handshake) |
+| `LOAD_FIFO` | Write activation/weight FIFOs (`K` beats) and optionally load `W` bias values in parallel. | `max(K, W)` |
+| `GEMM_COMPUTE` | Stream FIFOs into the array. `pe_wave` shift register supplies a `K`-wide diagonal enable window so each PE is active for exactly `K` cycles. | `A + W + K − 1` |
+| `GEMM_FLUSH` | Read array out column-by-column through the vector unit (scale → FP4 quantize → optional ReLU). | `W` (+ 2-cycle vector drain) |
+
+After `GEMM_COMPUTE`, if `TILE_LAST` is unset the FSM returns to `IDLE` and partial sums stay in the PE accumulators for the next tile; if it is set, it transitions to `GEMM_FLUSH`. `TILE_DONE` pulses on every tile boundary. A full 8×8×8 tile takes ~40 cycles end-to-end (8 load + 23 compute + 8 flush + handshake / pipeline drain).
+
 ### Processing element
 
 | Original (1-stage) | Pipelined (2-stage, used in final) |
@@ -71,19 +120,25 @@ Each PE is a fully-pipelined MAC:
 Bias is loaded directly into the accumulator on `ld_bias` (mutually exclusive with compute). The PE has **no reset** as the FSM guarantees a `LD_BIAS` fires before any compute, which initializes the accumulator deterministically.
 
 
-### Arithmetic units
+### Floating-point datapaths
 
-The pruned Dadda multiplier saves area, power and timing greatly accepting a small bounded scale multiply error.
+Three FP units were hand-optimised for the design. Each one was the bottleneck in an earlier iteration; each one has measured before/after numbers from synthesis.
+
+**FP16 dual-path adder** (`fp16_adder_truncation.sv`). The original adder had a long sequential path: bidirectional barrel shifter → 11-bit ripple-carry mantissa adder → full rounding stage with an extra exponent shifter. The optimised design splits this into a **near path** (effective subtractions with `|exp_diff| ≤ 1`: large shift *after* the add, leading-one-detector tree for normalize, 14-bit Kogge-Stone subtractor) and a **far path** (additions and large-difference subtractions: large shift *before* the add, 15-bit Kogge-Stone add/sub, 1-bit normalize). Rounding is replaced with round-toward-zero truncation. Net: **69.6 MHz → 89.1 MHz**, nominal power **0.172 mW → 0.124 mW**, mantissa error contribution ~0.02%.
+
+| Original FP16 adder | Dual-path FP16 adder |
+| :---: | :---: |
+| ![Original adder](DesignDiagrams/Final_Design_Diagrams-Original_Adder.drawio.png) | ![Dual path adder](DesignDiagrams/Final_Design_Diagrams-dual_path_Adder.drawio.png) |
+
+**Pruned Dadda multiplier** (`dadda_mul_trunc.sv`). The vector unit's 11×11 mantissa multiply only needs the top 8 product bits, so the design builds **only the partial products and reduction cells that feed bits [21:14]** — 45 reduction cells (3 HAs + 42 FAs) vs. 90 in the full tree, followed by an 8-cell ripple-carry adder that resolves only the top 8 bits. Net: **7,172 µm² → 2,320 µm²**, nominal power **0.378 mW → 0.031 mW**, frequency **110.4 MHz → 144.3 MHz**, with ~0.15–0.21% lost carries.
 
 | Original Dadda multiplier | Pruned Dadda (used in vector unit) |
 | :---: | :---: |
 | ![Original mul](DesignDiagrams/Final_Design_Diagrams-Original_Multiplier.drawio.png) | ![Pruned dadda](DesignDiagrams/Final_Design_Diagrams-Pruned_dadda_algorithm.drawio.png) |
 
-The dual-path FP16 adder (`fp16_adder_truncation.sv`) selects a near path for effective subtractions with `|exp_diff| ≤ 1` and a far path for everything else:
+**FP4×FP4 → FP16 multiplier** (`FloatP4x16.v`). The 2-bit effective-mantissa multiply is handled by `FixedP2x4_opt`, a hand-built 2×2 unsigned multiplier built directly from its truth table with only AND and XOR gates and explicit zero-input skipping. Small block, but it gets replicated 64× (one per PE), so the area win compounds.
 
-| Original FP16 adder | Dual-path FP16 adder |
-| :---: | :---: |
-| ![Original adder](DesignDiagrams/Final_Design_Diagrams-Original_Adder.drawio.png) | ![Dual path adder](DesignDiagrams/Final_Design_Diagrams-dual_path_Adder.drawio.png) |
+**PE pipelining.** The original single-cycle PE had gate depth 60 (~73 MHz). Inserting a register between the FP4 multiply and the FP16 add split it into the 2-stage pipeline used today, lifting cell-level fmax to **~91 MHz**.
 
 ### Control & data flow
 
@@ -94,6 +149,33 @@ The dual-path FP16 adder (`fp16_adder_truncation.sv`) selects a near path for ef
 | FSM (top) | FIFOs | Vector unit |
 | :---: | :---: | :---: |
 | ![FSM](DesignDiagrams/Final_Design_Diagrams-FSM_TOP.drawio.png) | ![FIFOs](DesignDiagrams/Final_Design_Diagrams-FIFOS.drawio.png) | ![Vector](DesignDiagrams/Final_Design_Diagrams-Vector_Unit.drawio.png) |
+
+---
+
+## Detailed Synthesis Results
+
+Hierarchical APR, signed off across `nom_tt_025C_1v80`, `min_ss_100C_1v60`, and `max_ff_n40C_1v95` at a 14 ns target.
+
+### Final `gemm_top` (hierarchical)
+
+| Metric | Value |
+|---|---|
+| Die area | 1.632 mm² (1240 × 1316 µm) |
+| Core area | 1.579 mm² |
+| Total cell area | 1.034 mm² (macros 0.971 mm², std cells 0.063 mm²) |
+| Instances | 13,004 (65 macros: 64 PE + 1 vector unit; 12,939 std cells) |
+| Core utilization | 65.5% |
+| Routed wirelength | ≈ 1.14 m |
+| Setup slack, worst (nom corner) | +6.68 ns |
+| Hold slack, worst (nom corner) | +0.31 ns |
+| Setup / hold violations | 0 across all three corners |
+| Nominal max frequency | 136.7 MHz (14 ns target − 6.68 ns slack) |
+
+### Macros
+
+The **GEMM PE macro** is 14,344 µm² (≈ 0.014 mm²) with 1,410 std cells at 86.4% utilization, +6.73 ns setup slack at the nom corner (~137.5 MHz). It is consistently the hierarchical critical path; the flat APR critical path is routing-dominated and varies by corner. The **vector unit macro** is hardened as a single 1149 × 46 µm row (≈ 0.053 mm²), matched to the width of the systolic array so it places directly beneath it.
+
+Timing closed cleanly at all three corners; residual signoff items are limited to a small number of max-slew and antenna warnings at the slow corner. Per-corner numbers are in [`Synthesis/<flow>/metrics.json`](Synthesis/).
 
 ---
 
